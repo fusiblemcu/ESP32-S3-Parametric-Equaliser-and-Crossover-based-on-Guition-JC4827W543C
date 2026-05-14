@@ -21,8 +21,6 @@ Flash settings:
 * USB Mode: "Hardware CDC and JTAG"
 * Zigbee Mode: "Disabled"
 
-Here's a README-ready section for the I2S pins:
-
 ---
 
 ## I2S Audio Connections
