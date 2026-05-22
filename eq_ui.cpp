@@ -718,7 +718,7 @@ static void fine_btn_cb(lv_event_t *e) {
     stage->fine_freq_lo = fmaxf(FREQ_MIN, b->freq / 2.0f);
     stage->fine_freq_hi = fminf(FREQ_MAX, b->freq * 2.0f);
     stage->fine_q_lo = fmaxf(Q_MIN, b->q / 2.0f);
-    stage->fine_q_hi = fminf(Q_MAX, b->q * 2.0f);
+    stage->fine_q_hi = fminf(Q_MAX, b->q * 4.0f);  // asymmetric: knob at ~33%, more range above for surgical narrowing
     stage->fine_gain_lo = fmaxf(GAIN_MIN, b->gain - 3.0f);
     stage->fine_gain_hi = fminf(GAIN_MAX, b->gain + 3.0f);
   }
@@ -1805,6 +1805,8 @@ static lv_obj_t *create_slider_row(lv_obj_t *parent, eq_stage_t *stage, int row,
   lv_slider_set_range(slider, range_min, range_max);
   lv_slider_set_value(slider, initial, LV_ANIM_OFF);
   style_slider_slim(slider);
+  lv_obj_set_style_pad_all(slider, 6, LV_PART_KNOB);       // larger touch target for EQ sliders
+  lv_obj_add_flag(slider, LV_OBJ_FLAG_ADV_HITTEST);         // restrict touch to knob area only
   lv_obj_add_event_cb(slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, stage);
 
   lv_obj_t *vlbl = lv_label_create(parent);
