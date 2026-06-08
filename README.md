@@ -51,3 +51,4 @@ The firmware uses a single I2S peripheral in **full-duplex mode** with shared cl
 > **Note:** Both DAC data lines share the same BCK, WS, and MCLK. The two DOUT lines carry the same clock domain but independent stereo data, allowing independent high/low channel DSP routing.
 
 ---
+Put lv_conf.h in arduino/libraries folder
