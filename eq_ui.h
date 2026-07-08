@@ -7,6 +7,7 @@
 
 void eq_ui_create(void);
 void eq_ui_update_preset_display(void);
+void eq_ui_viz_return(void);   // viz tap-return -> origin tile (called by spectrum module)
 void hardware_set_backlight(int percent);
 
 extern float current_fs;
@@ -32,6 +33,13 @@ typedef struct {
     float fine_gain_lo, fine_gain_hi;
     lv_obj_t * curve_area_obj;
     lv_obj_t * meter_area_obj;
+    lv_obj_t * ring_area_obj;   // Stage 1 redesign: custom-drawn FREQ/GAIN/Q rings
+    int selected_param;         // which ring drives the slider: 0=freq,1=gain,2=q
+    lv_obj_t * param_slider_obj; // Stage 2: single retargeting slider for the selected param
+    lv_obj_t * slider_center_mark; // vertical tick at track centre; GAIN only (marks 0 dB)
+    lv_obj_t * fine_readout_box;    // fine-adjust floating readout container (flex col)
+    lv_obj_t * fine_readout_val;    // 24pt value label inside the box
+    lv_obj_t * fine_readout_unit;   // 18pt unit label inside the box
     lv_obj_t * parent_tile;
     lv_obj_t * freq_slider_obj;
     lv_obj_t * q_slider_obj;
@@ -39,8 +47,8 @@ typedef struct {
     lv_obj_t * freq_val_label;
     lv_obj_t * q_val_label;
     lv_obj_t * band_gain_val_label;
-    lv_obj_t * fine_btn;
-    lv_obj_t * fine_btn_label;
+    lv_obj_t * fine_circle;
+    lv_obj_t * fine_label;
     lv_obj_t * lsh_btn;           // Low Shelf button: lit when selected band is LSH, dim otherwise
     lv_obj_t * hsh_btn;           // High Shelf button: lit when selected band is HSH, dim otherwise
     lv_obj_t * ch_l_btn;
@@ -69,6 +77,8 @@ typedef struct {
     lv_obj_t * band_btn_labels[MAX_BANDS];
     lv_obj_t * add_band_btn;   // fixed ADD BND button (bottom-right)
     lv_obj_t * del_band_btn;   // fixed DEL BND button (bottom-left)
+    lv_obj_t * shape_btn;         // shape-cycle button (BELL/LO SHLF/HI SHLF)
+    lv_obj_t * shape_btn_label;   // its label
     lv_obj_t * mute_btn;       // per-stage mute (below gain sliders)
     bool mute_flash_state;     // toggled by curve_timer for flash effect
     lv_point_precise_t curve_pts[CURVE_POINTS + 1];
@@ -114,6 +124,19 @@ typedef struct {
     lv_obj_t * test_signal_dropdown; // Phase 13: replaces noise_sw
     lv_obj_t * test_signal_slider;   // Phase 13: replaces noise_slider
     lv_obj_t * test_signal_val_label; // Phase 13: replaces noise_val_label
+    // Adjustable-sine tone panel (screen-level translucent overlay on EQ/xover)
+    lv_obj_t * tone_panel;            // full-width translucent container
+    lv_obj_t * tone_freq_slider;      // wide freq slider
+    lv_obj_t * tone_level_slider;     // short level slider
+    lv_obj_t * tone_level_val_label;   // dB readout right of level slider
+    lv_obj_t * tone_freq_val_label;   // large freq digits
+    lv_obj_t * tone_cf_btn_label;     // COARSE/FINE toggle label
+    bool  tone_active;                // panel shown, tone routed
+    bool  tone_fine_mode;             // freq slider coarse vs fine
+    float tone_freq_hz;               // current tone frequency
+    float tone_level_db;              // current tone level
+    float tone_fine_lo;               // fine-window low bound (Hz)
+    float tone_fine_hi;               // fine-window high bound (Hz)
     lv_obj_t * input_gain_slider_l;
     lv_obj_t * input_gain_slider_r;
     lv_obj_t * input_gain_label_l;

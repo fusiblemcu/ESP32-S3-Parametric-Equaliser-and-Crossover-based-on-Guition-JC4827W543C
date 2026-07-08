@@ -10,7 +10,8 @@ typedef enum {
   DSP_INPUT_NOISE,
   DSP_INPUT_SWEEP_30_20K_30S, // 30 Hz → 20 kHz, 30 second loop
   DSP_INPUT_SWEEP_20_20K_35S, // 20 Hz → 20 kHz, 35 second loop
-  DSP_INPUT_WARBLE_30_20K_30S // 30 Hz → 20 kHz carrier, ±5% FM @ 5 Hz, 30s loop
+  DSP_INPUT_WARBLE_30_20K_30S, // 30 Hz → 20 kHz carrier, ±5% FM @ 5 Hz, 30s loop
+  DSP_INPUT_TONE               // Static adjustable-frequency sine (UI-set freq/level)
 } dsp_input_source_t;
 
 typedef struct {
@@ -100,6 +101,9 @@ void dsp_set_active_bands(int stage_idx, int channel, int count);
 
 void dsp_set_input_source(dsp_input_source_t source);
 void dsp_update_noise_gen(bool enabled, float level_db);
+// Static tone: frequency in Hz, level in dBFS. Independent of noise level.
+void dsp_set_tone_freq(float hz);
+void dsp_set_tone_level(float level_db);
 
 void dsp_set_sample_rate(float fs);
 // Force-snap pending coefficients to live, zero all biquad internal state, and
@@ -136,7 +140,7 @@ void dsp_set_meter_active(int stage_idx, bool active);
 // Power-of-2 size so wrap uses bitwise AND.
 #define SCOPE_BUF_SIZE 1024
 extern volatile float scope_ring_buf[SCOPE_BUF_SIZE];
-extern volatile int   scope_ring_idx;   // monotonically incrementing write cursor
+extern volatile uint32_t scope_ring_idx; // monotonic write cursor (unsigned: wrap is defined)
 
 // Copy the most recent len samples (time-ordered, oldest first) into dst.
 // Safe to call from any task — no locking needed for a free-running display.

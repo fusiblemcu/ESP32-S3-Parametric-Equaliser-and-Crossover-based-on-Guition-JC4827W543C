@@ -59,6 +59,96 @@
 #define SL_VAL_X 412
 #define SL_VAL_W 60
 
+// --- Redesigned EQ control section: FREQ/GAIN/Q rings (Stage 1) ---
+// Ring area object spans below the curve. Rings are custom-drawn arcs with a
+// gap at the bottom (open wedge straddling 0deg in LVGL's arc angle system:
+// 0deg=bottom, 90deg=right, clockwise). Values map to fill via value_to_norm().
+#define RING_AREA_X      0
+#define RING_AREA_Y      (CURVE_Y + CURVE_H - 6)          // 164: 10px above prev
+#define RING_AREA_W      SCREEN_W                          // full width; draw clips
+#define RING_AREA_H      (SCREEN_H - RING_AREA_Y)          // to screen bottom
+#define RING_R           26                                // arc radius (mockup)
+#define RING_STROKE      4                                 // arc width (mockup)
+#define RING_CY          (40)                              // arc centre Y within area (RING_AREA_Y+40 = 214 screen)
+#define RING_GAP_DEG     64                                // bottom open wedge, degrees
+// Filled sweep runs clockwise. NOTE: despite the lv_draw_arc_get_area header
+// doc claiming "0 deg on the bottom", this build renders 0 deg at the RIGHT
+// (verified on hardware: a gap centred on 0 deg appeared at 3 o'clock). Angles
+// increase clockwise, so bottom = 90 deg. Gap is therefore centred on 90 deg.
+#define RING_TRACK_DEG   (360 - RING_GAP_DEG)              // 296
+#define RING_START_DEG   (90 + RING_GAP_DEG / 2)          // 122: just CW of bottom
+#define RING_END_DEG     (90 - RING_GAP_DEG / 2 + 360)    // 418: bottom, long way CW
+// Three ring centres, evenly spaced between the band-readout column right edge
+// (~x56) and the FINE circle left edge (x325-13=312). Derived, not eyeballed.
+#define RING_CX0         127
+#define RING_CX1         196
+#define RING_CX2         265
+
+// Band readout column (left of the rings): "< N >" over a "BAND" label.
+// N = selected_band+1 (matches curve marker). Arrows tap prev/next active band,
+// split at the number's horizontal centre. Left arrow padded from screen edge.
+#define BAND_RO_ARROW_X0   29                // '<' left ref; box left edge -> CURVE_X (28)
+#define BAND_RO_ARROW_INSET (-1)             // arrow inner edge = number-box edge minus this (was 1; -1 pulls arrows 2px inward). Tune on HW.
+#define BAND_RO_ROW_DY     10                // '< N >' row vertical drop (BAND label stays)
+#define BAND_RO_TAP_VPAD   20                // tap zone half-height above/below split
+// N-row baseline shares the ring value row (cy-relative); BAND label shares the
+// FREQ/GAIN/Q param row. Both derived in the draw cb from RING_CY / RING_R.
+
+// Stage 2: single retargeting parameter slider, in the freed space below the
+// ring param labels (old slider strip + bottom row removed). Full width.
+#define PSL_X            8
+#define PSL_W            (SCREEN_W - 16)                   // 464
+#define PSL_Y            257
+#define PSL_H            6
+
+// Slider centre tick (GAIN only, marks 0 dB). 2px wide, centred on the even
+// track width so it straddles the true centre. Vertical span pokes ~2px past
+// the knob top/bottom. Knob half-height is DERIVED (PSL_H/2 + KNOB pad), NOT
+// measured against this build's render — tune PSL_TICK_HALF against hardware.
+#define PSL_CX           (PSL_X + PSL_W / 2)               // 240 (track centre)
+#define PSL_TICK_W       2
+#define PSL_TICK_CY      (PSL_Y + PSL_H / 2)               // 260 (track centre Y)
+#define PSL_TICK_HALF    11                                // knob ~= PSL_H+2*6=18 -> half 9, +2 poke = 11
+
+// Slider lockout strip: full-width container over the bottom strip that wins
+// the touch hit-test (CLICKABLE) so horizontal drags don't reach the tileview
+// scroll (page swipe). Slider + centre tick are its children. Mirrors the proven
+// gain-popup panel pattern (SCROLLABLE + GESTURE_BUBBLE cleared). Top = 2px below
+// BELL bottom (RBTN_SHAPE_Y+RBTN_H+2); extends to screen bottom.
+#define PSLK_X           0
+#define PSLK_Y           (RBTN_SHAPE_Y + RBTN_H + 2)       // 243
+#define PSLK_W           SCREEN_W                          // 480
+#define PSLK_H           (SCREEN_H - PSLK_Y)               // 29
+// Centre-tap snap zone in px around PSL_CX. Reuses the existing gain snap zone
+// (±BAND_GAIN_SNAP_ZONE=30 slider units) converted through the GAIN track:
+// PSL_W(464)/300 units = px/unit -> 30*464/300 = 46px. Defined at use to avoid
+// a forward-ref to BAND_GAIN_SNAP_ZONE (declared later).
+
+// Right-hand solid button column (DEL / ADD / BELL). Right edge pinned to the
+// graph right border (CURVE_X+CURVE_W=428). W/H/pitch are first-pass values to
+// tune against a render. Column ends before PSL_Y(257): BELL bottom = 230+19=249.
+#define RBTN_W           76
+#define RBTN_H           18
+#define RBTN_RIGHT       (CURVE_X + CURVE_W)               // 428
+#define RBTN_X           (RBTN_RIGHT - RBTN_W)             // 352
+#define RBTN_PITCH       23                                // H(18) + 5 gap
+#define RBTN_DEL_Y       177                               // top fixed
+#define RBTN_ADD_Y       200                               // DEL_Y + PITCH
+#define RBTN_SHAPE_Y     223                               // DEL_Y + 2*PITCH; BELL bottom 223+18=241
+// Solid fills from the band palette; black text. No state-recolour.
+#define RBTN_COL_DEL     lv_color_hex(0xCC3333)            // band palette Red   (idx0)
+#define RBTN_COL_ADD     lv_color_hex(0x33BB33)            // band palette Green (idx3)
+#define RBTN_COL_SHAPE   lv_color_hex(0xCCAA00)            // band palette Gold  (idx2)
+
+// FINE circle: drawn ring in the gap between the Q ring (right edge 305) and the
+// button column (left edge 332). Centre in that gap, on the ring value-row Y
+// (RING_AREA_Y+RING_CY=214). R13 spans 306..332 — tight (~1px slack each side).
+#define FINE_CX          321
+#define FINE_CY          214                               // = RING_AREA_Y + RING_CY
+#define FINE_R           13
+#define FINE_STROKE      2
+#define FINE_MARGIN      2                                 // pad area so stroke+AA isn't clipped by object bounds
+
 // Band button row
 #define BB_W 20
 #define BB_H 18
@@ -112,6 +202,7 @@
 #define COL_GRID_ZERO lv_color_hex(0x3A3A5A)
 #define COL_CURVE lv_color_hex(0x00FF88)
 #define COL_SLIDER_IND lv_color_hex(0x4444AA)
+#define COL_FINE_ON    lv_color_hex(0xFF8C00)   // flashing inner of the FINE circle when active
 #define COL_BAND_RED lv_color_hex(0xCC3333)
 #define COL_BLACK lv_color_hex(0x000000)
 #define COL_BTN_FACE lv_color_hex(0x1A1A2E)
@@ -213,9 +304,64 @@ static lv_obj_t *tile_config_ref = NULL; // Reference for config page
 static lv_obj_t *tile_spectrum_ref =
     NULL; // Reference for showing/hiding spectrum tile
 static lv_timer_t *curve_timer = NULL;
+static bool fine_flash_on = false;   // toggled ~4Hz by the flash block for the FINE circle
+
+// Fine-adjust floating readout: shown while adjusting the param slider in fine
+// mode, persisting FINE_READOUT_HOLD_MS after the last activity. The flash block
+// (~33ms) hides it once elapsed. Which stage owns it is implicit: only the active
+// tile's ring area draws, and selected_param picks the arc.
+static uint32_t fine_readout_active_time = 0;   // lv_tick of last press/adjust; 0 = never
+static bool     fine_readout_visible = false;
+#define FINE_READOUT_HOLD_MS 1000
+
+static void fine_readout_update(eq_stage_t *stage);   // fwd: defined after fmt helpers
+static void fine_readout_hide(eq_stage_t *stage);     // fwd: defined after fmt helpers
+
+// Arm/refresh the fine-adjust readout (only meaningful in fine mode).
+static inline void fine_readout_touch(eq_stage_t *stage) {
+  if (!stage->fine_mode) return;
+  fine_readout_visible = true;
+  fine_readout_active_time = lv_tick_get();
+  fine_readout_update(stage);   // set text + position + show
+}
 
 // Track last active tile for meter activation
 static int last_active_tile_idx = -1;
+
+// Nav buttons (CFG/VIS on EQ/xover, RET/VIS on config). Tile indices:
+// config=0, input=1, xover=2, output=3, sub=4, spectrum=5.
+static int nav_return_tile = 1;   // where RET goes; set on CFG-jump, default INPUT
+static int viz_return_tile = 1;   // where viz tap-return goes; set on VIS-jump, default INPUT
+
+static void tone_panel_close(void);   // fwd: defined with the tone panel
+
+static void nav_cfg_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !main_tileview) return;
+  if (sys_config.tone_active) tone_panel_close();   // kill tone popup on leave
+  nav_return_tile = sys_config.active_tile;   // remember origin EQ/xover tile
+  if (nav_return_tile < 1 || nav_return_tile > 4) nav_return_tile = 1;  // guard
+  lv_obj_set_tile_id(main_tileview, 0, 0, LV_ANIM_OFF);
+}
+
+static void nav_vis_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !main_tileview) return;
+  if (sys_config.tone_active) tone_panel_close();   // kill tone popup on leave
+  viz_return_tile = sys_config.active_tile;   // remember origin for tap-return
+  if (viz_return_tile < 0 || viz_return_tile > 4) viz_return_tile = 1;  // guard (0=config allowed)
+  lv_obj_set_tile_id(main_tileview, 5, 0, LV_ANIM_OFF);
+}
+
+// Public: tap on the viz page returns to the tile viz was entered from.
+// Called from spectrum_analyzer.cpp's spectrum_area CLICKED handler.
+void eq_ui_viz_return(void) {
+  if (!main_tileview) return;
+  lv_obj_set_tile_id(main_tileview, viz_return_tile, 0, LV_ANIM_OFF);
+}
+
+static void nav_ret_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !main_tileview) return;
+  lv_obj_set_tile_id(main_tileview, nav_return_tile, 0, LV_ANIM_OFF);
+}
 
 // Robust scroll guard: set true for the FULL duration of scroll+snap animation.
 // Using an event flag is more reliable than polling LV_STATE_SCROLLED, which
@@ -290,7 +436,8 @@ static void tileview_scroll_event_cb(lv_event_t *e) {
 // Forward declarations
 static void format_gain_label(char *buf, int bufsize, float db);
 static void rebuild_band_buttons(eq_stage_t *stage);
-static void sync_sliders_to_band(eq_stage_t *stage);
+static void sync_band_display(eq_stage_t *stage);
+static void param_slider_retarget(eq_stage_t *stage);
 static void update_channel_button_style(eq_stage_t *stage);
 static void sync_input_gain_to_config(void);
 static void sync_input_gain_from_config(void);
@@ -337,6 +484,18 @@ static inline int stage_to_idx(eq_stage_t *s) {
 }
 static inline int *get_nbp(eq_stage_t *s) { // num_bands pointer
   return (s->channel_mode == CH_MODE_RIGHT) ? &s->num_bands_r : &s->num_bands_l;
+}
+
+// Clamp a stage's band selection into the currently active range. Needed
+// after any operation that replaces band data wholesale (preset load,
+// session restore): selected_band survives the swap, and if the incoming
+// preset has fewer active bands the selection points at a phantom slot —
+// in-bounds memory-wise (arrays are MAX_BANDS) but not an active band, so
+// the rings/readout show a band the filter list doesn't contain.
+static void clamp_selected_band(eq_stage_t *s) {
+  int n = *get_nbp(s);
+  if (s->selected_band >= n)
+    s->selected_band = (n > 0) ? (n - 1) : 0;
 }
 
 // Push band data to DSP for the active channel (or both if linked)
@@ -431,6 +590,30 @@ static float slider_to_freq(eq_stage_t *stage, int val) {
   return log_to_freq(adjusted);
 }
 
+// Tone freq <-> slider (0..FREQ_SLIDER_MAX). Mirrors slider_to_freq/freq_to_slider
+// but uses sys_config.tone_fine_* for the fine window. Coarse = full-range log.
+static float tone_slider_to_freq(int val) {
+  float t = (float)val / FREQ_SLIDER_MAX;
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  if (sys_config.tone_fine_mode) {
+    return expf(logf(sys_config.tone_fine_lo) +
+                t * (logf(sys_config.tone_fine_hi) - logf(sys_config.tone_fine_lo)));
+  }
+  return log_to_freq(powf(t, FREQ_CURVE));
+}
+
+static int tone_freq_to_slider(float freq) {
+  if (sys_config.tone_fine_mode) {
+    float norm = (logf(freq) - logf(sys_config.tone_fine_lo)) /
+                 (logf(sys_config.tone_fine_hi) - logf(sys_config.tone_fine_lo));
+    if (norm < 0.0f) norm = 0.0f;
+    if (norm > 1.0f) norm = 1.0f;
+    return (int)(norm * FREQ_SLIDER_MAX + 0.5f);
+  }
+  return (int)(powf(freq_to_log(freq), 1.0f / FREQ_CURVE) * FREQ_SLIDER_MAX + 0.5f);
+}
+
 static int q_to_slider(eq_stage_t *stage, float q) {
   if (stage->fine_mode) {
     float norm = (logf(q) - logf(stage->fine_q_lo)) /
@@ -499,20 +682,6 @@ static float slider_to_gain(eq_stage_t *stage, int val) {
 // ============================================================
 // Update value labels from current band data
 // ============================================================
-static void update_value_labels(eq_stage_t *stage) {
-  char buf[16];
-  eq_band_t *b = &get_bands(stage)[stage->selected_band];
-
-  format_freq(buf, sizeof(buf), b->freq);
-  lv_label_set_text(stage->freq_val_label, buf);
-
-  format_q(buf, sizeof(buf), b->q);
-  lv_label_set_text(stage->q_val_label, buf);
-
-  format_gain(buf, sizeof(buf), b->gain);
-  lv_label_set_text(stage->band_gain_val_label, buf);
-}
-
 // ============================================================
 // Shelf button styles + callbacks (LSH / HSH)
 // ============================================================
@@ -597,25 +766,76 @@ static void hsh_draw_cb(lv_event_t *e) {
   lv_draw_line(layer, &dsc);
 }
 
-static void lsh_btn_cb(lv_event_t *e) {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
-  eq_band_t *b = &get_bands(stage)[stage->selected_band];
-  b->type = (b->type == FTYPE_LOW_SHELF) ? FTYPE_PEAK : FTYPE_LOW_SHELF;
-  update_shelf_button_styles(stage);
-  stage->curve_dirty = true;
-  mirror_band_if_linked(stage, stage->selected_band);
-  dsp_push_band(stage, stage->selected_band);
-  lv_obj_invalidate(lv_screen_active());
-  preset_mark_dirty();
+// Shape-cycle button: label reflects the selected band's filter type.
+// Explicit switch (enum numeric order in eq_data.h is unverified here).
+static void update_shape_button_label(eq_stage_t *stage) {
+  if (!stage->shape_btn_label) return;
+  filter_type_t t = get_bands(stage)[stage->selected_band].type;
+  const char *txt = "";   // PEAK: no text, bell glyph drawn by shape_btn_draw_cb
+  switch (t) {
+    case FTYPE_LOW_SHELF:  txt = "LO SHLF"; break;
+    case FTYPE_HIGH_SHELF: txt = "HI SHLF"; break;
+    default:               txt = "";        break;  // FTYPE_PEAK -> bell glyph
+  }
+  lv_label_set_text(stage->shape_btn_label, txt);
+  if (stage->shape_btn) lv_obj_invalidate(stage->shape_btn);  // redraw bell/clear
 }
 
-static void hsh_btn_cb(lv_event_t *e) {
+// Draw a small bell curve on the shape button when the selected band is PEAK.
+// Black 1px polyline, ~20px wide, 10px tall, centred, with 2px flat flare tails
+// at the base. Shelf states draw nothing (their text label shows instead).
+static void shape_btn_draw_cb(lv_event_t *e) {
+  lv_layer_t *layer = lv_event_get_layer(e);
+  lv_obj_t   *obj   = (lv_obj_t *)lv_event_get_target(e);
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+  if (get_bands(stage)[stage->selected_band].type != FTYPE_PEAK) return;
+
+  lv_area_t co;
+  lv_obj_get_coords(obj, &co);
+  int cx = (co.x1 + co.x2) / 2;
+  int cy = (co.y1 + co.y2) / 2;
+  int by = cy + 5;    // baseline (curve is 10px tall: peak at cy-5)
+
+  // Half-bell profile as (dx, dy-from-baseline) points, base->peak. Mirrored for
+  // the right half. Tails: 2px flat flare at the base (dy=0 across dx 10->8).
+  static const int prof[][2] = {
+    {10, 0}, {8, 0},   // 2px flat flare
+    {7, 1}, {6, 3}, {5, 5}, {4, 7}, {3, 8}, {2, 9}, {1, 10}, {0, 10}
+  };
+  const int N = (int)(sizeof(prof) / sizeof(prof[0]));
+
+  lv_draw_line_dsc_t ld;
+  lv_draw_line_dsc_init(&ld);
+  ld.color = RBTN_COL_SHAPE;
+  ld.width = 1;
+  ld.opa   = LV_OPA_COVER;
+
+  // Left half: from left tail up to peak.
+  for (int i = 0; i < N - 1; i++) {
+    ld.p1.x = (lv_coord_t)(cx - prof[i][0]);   ld.p1.y = (lv_coord_t)(by - prof[i][1]);
+    ld.p2.x = (lv_coord_t)(cx - prof[i+1][0]); ld.p2.y = (lv_coord_t)(by - prof[i+1][1]);
+    lv_draw_line(layer, &ld);
+  }
+  // Right half: mirror.
+  for (int i = 0; i < N - 1; i++) {
+    ld.p1.x = (lv_coord_t)(cx + prof[i][0]);   ld.p1.y = (lv_coord_t)(by - prof[i][1]);
+    ld.p2.x = (lv_coord_t)(cx + prof[i+1][0]); ld.p2.y = (lv_coord_t)(by - prof[i+1][1]);
+    lv_draw_line(layer, &ld);
+  }
+}
+
+// Cycle BELL(PEAK) -> LO SHLF -> HI SHLF -> BELL. Order-independent switch.
+static void shape_btn_cb(lv_event_t *e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
   eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
   eq_band_t *b = &get_bands(stage)[stage->selected_band];
-  b->type = (b->type == FTYPE_HIGH_SHELF) ? FTYPE_PEAK : FTYPE_HIGH_SHELF;
-  update_shelf_button_styles(stage);
+  switch (b->type) {
+    case FTYPE_PEAK:       b->type = FTYPE_LOW_SHELF;  break;
+    case FTYPE_LOW_SHELF:  b->type = FTYPE_HIGH_SHELF; break;
+    case FTYPE_HIGH_SHELF: b->type = FTYPE_PEAK;       break;
+    default:               b->type = FTYPE_PEAK;       break;
+  }
+  update_shape_button_label(stage);
   stage->curve_dirty = true;
   mirror_band_if_linked(stage, stage->selected_band);
   dsp_push_band(stage, stage->selected_band);
@@ -626,16 +846,15 @@ static void hsh_btn_cb(lv_event_t *e) {
 // ============================================================
 // Sync slider positions + labels to selected band
 // ============================================================
-static void sync_sliders_to_band(eq_stage_t *stage) {
-  eq_band_t *b = &get_bands(stage)[stage->selected_band];
-  lv_slider_set_value(stage->freq_slider_obj, freq_to_slider(stage, b->freq),
-                      LV_ANIM_OFF);
-  lv_slider_set_value(stage->q_slider_obj, q_to_slider(stage, b->q),
-                      LV_ANIM_OFF);
-  lv_slider_set_value(stage->band_gain_slider_obj,
-                      gain_to_slider(stage, b->gain), LV_ANIM_OFF);
-  update_value_labels(stage);
+static void sync_band_display(eq_stage_t *stage) {
+  // Refreshes the ring display (FREQ/GAIN/Q) by invalidating the ring area, plus
+  // shelf/shape styles. (Formerly sync_sliders_to_band — the band sliders it
+  // drove were removed in the ring redesign.)
+  if (stage->ring_area_obj)
+    lv_obj_invalidate(stage->ring_area_obj);
+  param_slider_retarget(stage);
   update_shelf_button_styles(stage);
+  update_shape_button_label(stage);
 }
 
 // ============================================================
@@ -694,14 +913,53 @@ static void mute_btn_cb(lv_event_t *e) {
 }
 
 static void update_fine_button_style(eq_stage_t *stage) {
-  if (stage->fine_mode) {
-    lv_obj_set_style_bg_color(stage->fine_btn, COL_SLIDER_IND, 0);
-    lv_obj_set_style_bg_opa(stage->fine_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(stage->fine_btn_label, COL_WHITE, 0);
-  } else {
-    lv_obj_set_style_bg_color(stage->fine_btn, COL_BOX_LIST, 0);
-    lv_obj_set_style_bg_opa(stage->fine_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(stage->fine_btn_label, COL_WHITE, 0);
+  // FINE is now a custom-drawn circle (fine_circle_draw_cb owns appearance).
+  // This just triggers a redraw; retained for its ~10 call sites.
+  if (stage->fine_circle)
+    lv_obj_invalidate(stage->fine_circle);
+}
+
+// FINE circle draw: grey ring always; flashing orange inner disc when active.
+// Area is 2*FINE_R square, so centre = coords centre.
+static void fine_circle_draw_cb(lv_event_t *e) {
+  lv_layer_t *layer = lv_event_get_layer(e);
+  lv_obj_t   *obj   = (lv_obj_t *)lv_event_get_target(e);
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  int cx = (coords.x1 + coords.x2) / 2;
+  int cy = (coords.y1 + coords.y2) / 2;
+
+  // Ring (full circle, grey wall)
+  lv_draw_arc_dsc_t adsc;
+  lv_draw_arc_dsc_init(&adsc);
+  adsc.center.x = cx;
+  adsc.center.y = cy;
+  adsc.radius   = FINE_R;
+  adsc.width    = FINE_STROKE;
+  adsc.color    = COL_TEXT_DIM;
+  adsc.opa      = LV_OPA_COVER;
+  adsc.start_angle = 0;
+  adsc.end_angle   = 360;
+  lv_draw_arc(layer, &adsc);
+
+  // Flashing orange inner disc when fine mode is on. Drawn as a full-circle arc
+  // (same primitive + centre as the ring) so it can't offset against it the way
+  // an inscribed rounded-rect did. width>=radius fills solid to the centre.
+  if (stage->fine_mode && fine_flash_on) {
+    int ir = FINE_R - FINE_STROKE / 2 - 1;   // sits just inside the ring inner edge
+    lv_draw_arc_dsc_t ddsc;
+    lv_draw_arc_dsc_init(&ddsc);
+    ddsc.center.x    = cx;
+    ddsc.center.y    = cy;
+    ddsc.radius      = ir;
+    ddsc.width       = ir + 1;               // >= radius -> filled disc, no centre pinhole
+    ddsc.color       = COL_FINE_ON;
+    ddsc.opa         = LV_OPA_COVER;
+    ddsc.start_angle = 0;
+    ddsc.end_angle   = 360;
+    lv_draw_arc(layer, &ddsc);
   }
 }
 
@@ -713,6 +971,7 @@ static void fine_btn_cb(lv_event_t *e) {
   stage->fine_mode = !stage->fine_mode;
 
   if (stage->fine_mode) {
+    fine_flash_on = true;   // light immediately, don't wait for the flash timer
     eq_band_t *b = &get_bands(stage)[stage->selected_band];
 
     stage->fine_freq_lo = fmaxf(FREQ_MIN, b->freq / 2.0f);
@@ -721,10 +980,13 @@ static void fine_btn_cb(lv_event_t *e) {
     stage->fine_q_hi = fminf(Q_MAX, b->q * 4.0f);  // asymmetric: knob at ~33%, more range above for surgical narrowing
     stage->fine_gain_lo = fmaxf(GAIN_MIN, b->gain - 3.0f);
     stage->fine_gain_hi = fminf(GAIN_MAX, b->gain + 3.0f);
+  } else {
+    fine_readout_visible = false;
+    fine_readout_hide(stage);
   }
 
   update_fine_button_style(stage);
-  sync_sliders_to_band(stage);
+  sync_band_display(stage);
 }
 
 // ============================================================
@@ -907,64 +1169,6 @@ static void curve_timer_cb(lv_timer_t *timer) {
   preset_timer_check(); // Save timeout + flash animation
 }
 
-// ============================================================
-// Slider event callback
-// ============================================================
-static void slider_event_cb(lv_event_t *e) {
-  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED)
-    return;
-  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
-  lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
-  int val = lv_slider_get_value(slider);
-  eq_band_t *b = &get_bands(stage)[stage->selected_band];
-
-  if (slider == stage->freq_slider_obj)
-    b->freq = slider_to_freq(stage, val);
-  else if (slider == stage->q_slider_obj)
-    b->q = slider_to_q(stage, val);
-  else if (slider == stage->band_gain_slider_obj)
-    b->gain = slider_to_gain(stage, val);
-
-  update_value_labels(stage);
-  stage->curve_dirty = true;
-  mirror_band_if_linked(stage, stage->selected_band);
-  dsp_push_band(stage, stage->selected_band);
-
-  preset_mark_dirty();
-  update_all_preset_boxes(); // This removes the red box immediately
-}
-
-// ============================================================
-// Band button callbacks
-// ============================================================
-static void band_btn_cb(lv_event_t *e) {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
-    return;
-  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
-  lv_obj_t *target = (lv_obj_t *)lv_event_get_target(e);
-
-  int idx = -1;
-  for (int i = 0; i < MAX_BANDS; i++) {
-    if (stage->band_btns[i] == target) {
-      idx = i;
-      break;
-    }
-  }
-
-  if (idx < 0 || idx >= (*get_nbp(stage)))
-    return;
-
-  stage->selected_band = idx;
-
-  if (stage->fine_mode) {
-    stage->fine_mode = false;
-    update_fine_button_style(stage);
-  }
-
-  sync_sliders_to_band(stage);
-  rebuild_band_buttons(stage);
-}
-
 // Open the filter-list overlay for the stage this button belongs to.
 // user_data is the stage pointer (wired up in create_eq_page).
 static void list_btn_cb(lv_event_t *e) {
@@ -994,7 +1198,7 @@ static void add_band_cb(lv_event_t *e) {
     update_fine_button_style(stage);
   }
 
-  sync_sliders_to_band(stage);
+  sync_band_display(stage);
   rebuild_band_buttons(stage);
   stage->curve_dirty = true;
 
@@ -1038,7 +1242,7 @@ void eq_ui_select_band(eq_stage_t *stage, int idx) {
     update_fine_button_style(stage);
   }
 
-  sync_sliders_to_band(stage);
+  sync_band_display(stage);
   rebuild_band_buttons(stage);
   // Selection change does not change the curve, so no curve_dirty flag.
 }
@@ -1059,7 +1263,7 @@ void eq_ui_commit_band(eq_stage_t *stage, int idx) {
   // (e.g. after a type change the sliders' semantics don't move but
   // after a freq/gain/q change they're stale).
   if (stage->selected_band == idx) {
-    sync_sliders_to_band(stage);
+    sync_band_display(stage);
   }
 
   preset_mark_dirty();
@@ -1085,7 +1289,7 @@ void eq_ui_add_band(eq_stage_t *stage) {
     update_fine_button_style(stage);
   }
 
-  sync_sliders_to_band(stage);
+  sync_band_display(stage);
   rebuild_band_buttons(stage);
   stage->curve_dirty = true;
 
@@ -1164,7 +1368,7 @@ void eq_ui_remove_band_at(eq_stage_t *stage, int idx) {
     dsp_set_active_bands(si, ch, *nbp);
   }
 
-  sync_sliders_to_band(stage);
+  sync_band_display(stage);
   rebuild_band_buttons(stage);
   stage->curve_dirty = true;
   preset_mark_dirty();
@@ -1177,8 +1381,13 @@ static void rebuild_band_buttons(eq_stage_t *stage) {
   int n = *get_nbp(stage);
   int start_x = BB_BAND_START_X;
 
-  for (int i = 0; i < MAX_BANDS; i++) {
-    if (i < n) {
+  // Old band-ID buttons removed (ring redesign). Skip their layout/style when
+  // absent; DEL/ADD sections below already null-guard. Band selection now via
+  // curve tap. Effectively a no-op post-removal but kept (with its 11 callers)
+  // until the BAND-readout tap-cycle lands.
+  if (stage->band_btns[0]) {
+    for (int i = 0; i < MAX_BANDS; i++) {
+      if (i < n) {
       int x = start_x + i * (BB_W + BB_GAP);
       lv_obj_set_pos(stage->band_btns[i], x, BB_ROW_Y);
       lv_obj_clear_flag(stage->band_btns[i], LV_OBJ_FLAG_HIDDEN);
@@ -1213,26 +1422,10 @@ static void rebuild_band_buttons(eq_stage_t *stage) {
       lv_obj_add_flag(stage->band_btns[i], LV_OBJ_FLAG_HIDDEN);
     }
   }
+  } // end if (band_btns[0])
 
-  // Grey-out DEL BND when only 1 band remains, ADD BND at MAX_BANDS
-  if (stage->del_band_btn) {
-    bool can_del = n > 1;
-    lv_color_t del_col = can_del ? lv_color_hex(0xFF5555) : lv_color_hex(0x444444);
-    lv_obj_set_style_border_color(stage->del_band_btn, del_col, 0);
-    lv_obj_set_style_text_color(
-        lv_obj_get_child(stage->del_band_btn, 0), del_col, 0);
-    if (can_del) lv_obj_add_flag(stage->del_band_btn, LV_OBJ_FLAG_CLICKABLE);
-    else         lv_obj_clear_flag(stage->del_band_btn, LV_OBJ_FLAG_CLICKABLE);
-  }
-  if (stage->add_band_btn) {
-    bool can_add = n < MAX_BANDS;
-    lv_color_t add_col = can_add ? lv_color_hex(0x55CC55) : lv_color_hex(0x444444);
-    lv_obj_set_style_border_color(stage->add_band_btn, add_col, 0);
-    lv_obj_set_style_text_color(
-        lv_obj_get_child(stage->add_band_btn, 0), add_col, 0);
-    if (can_add) lv_obj_add_flag(stage->add_band_btn, LV_OBJ_FLAG_CLICKABLE);
-    else         lv_obj_clear_flag(stage->add_band_btn, LV_OBJ_FLAG_CLICKABLE);
-  }
+  // DEL/ADD are solid, no state recolour. Handlers self-guard at limits
+  // (ADD no-ops at MAX_BANDS, DEL at 1 band), so no grey-out/disable here.
 
   lv_obj_invalidate(lv_screen_active());
 }
@@ -1736,12 +1929,12 @@ static void curve_area_draw_cb(lv_event_t *e) {
         lv_draw_rect_dsc_init(&ring_dsc);
         ring_dsc.bg_opa = LV_OPA_TRANSP;
         ring_dsc.border_color = COL_WHITE;
-        ring_dsc.border_width = 2;
+        ring_dsc.border_width = 3;
         ring_dsc.border_opa = LV_OPA_COVER;
-        ring_dsc.radius = dot_r + 2;
+        ring_dsc.radius = dot_r + 3;
         lv_area_t ring_a = {
-            (lv_coord_t)(mx - dot_r - 2), (lv_coord_t)(my - dot_r - 2),
-            (lv_coord_t)(mx + dot_r + 1), (lv_coord_t)(my + dot_r + 1)};
+            (lv_coord_t)(mx - dot_r - 3), (lv_coord_t)(my - dot_r - 3),
+            (lv_coord_t)(mx + dot_r + 2), (lv_coord_t)(my + dot_r + 2)};
         lv_draw_rect(layer, &ring_dsc, &ring_a);
       }
 
@@ -1761,97 +1954,65 @@ static void curve_area_draw_cb(lv_event_t *e) {
       snprintf(marker_bufs[i], sizeof(marker_bufs[i]), "%d", i + 1);
       lv_draw_label_dsc_init(&label_dsc);
       label_dsc.color = col;
-      label_dsc.font = &lv_font_montserrat_10;
+      label_dsc.font = &lv_font_montserrat_12;
       label_dsc.text = marker_bufs[i];
       label_dsc.align = LV_TEXT_ALIGN_CENTER;
 
-      int lbl_y = my - dot_r - 13;
-      if (lbl_y < oy)
-        lbl_y = my + dot_r + 2; // flip below
+      int lbl_h = lv_font_get_line_height(label_dsc.font);
+      // Position label clear of the ring: bottom edge 1px above ring outer top
+      // (ring outer radius = dot_r + 3). Self-correcting for font height.
+      int lbl_y = my - dot_r - 4 - lbl_h;
+      bool lbl_flipped = false;
+      if (lbl_y < oy) {
+        lbl_y = my + dot_r + 4; // flip below: top edge 1px under ring bottom
+        lbl_flipped = true;
+      }
 
-      lv_area_t lbl_a = {(lv_coord_t)(mx - 10), (lv_coord_t)(lbl_y),
-                         (lv_coord_t)(mx + 10), (lv_coord_t)(lbl_y + 12)};
+      lv_area_t lbl_a = {(lv_coord_t)(mx - 12), (lv_coord_t)(lbl_y),
+                         (lv_coord_t)(mx + 12), (lv_coord_t)(lbl_y + lbl_h)};
       lv_draw_label(layer, &label_dsc, &lbl_a);
+
+      // Selected-band arrow: filled white triangle pointing at the dot.
+      // Normally above the number pointing DOWN; flips below pointing UP when
+      // its base would clip the curve-area top (oy) — decided on the ARROW's
+      // own geometry, independent of the label flip, so it never disappears at
+      // high positive gain. Base = ring outer diameter (2*(dot_r+3)=18),
+      // height ~= base. Scanline-filled via lv_draw_line (lv_draw_triangle
+      // signature unverified for this build; line fill is proven above).
+      if (sel) {
+        const int A_HALF = dot_r + 3;   // base half-width = ring outer radius (9)
+        const int A_H    = 2 * A_HALF;  // full triangle height (18); base truncated in fill
+        lv_draw_line_dsc_t ad;
+        lv_draw_line_dsc_init(&ad);
+        ad.color = COL_WHITE;
+        ad.width = 1;
+        ad.opa   = LV_OPA_COVER;
+
+        // Preferred: above the number, pointing down, tip 1px above label top.
+        int down_tip  = lbl_flipped ? (my - dot_r - 3 - 1) : (lbl_y - 1);
+        int down_base = down_tip - A_H;
+        int tip_y, base_y, dir;
+        if (down_base >= oy) {
+          // Fits above without clipping — point down.
+          tip_y = down_tip; base_y = down_base; dir = +1;
+        } else {
+          // Would clip the top — flip below the number, point up.
+          int ref_bot = lbl_flipped ? (lbl_y + lbl_h) : (my + dot_r + 3);
+          tip_y = ref_bot + 1; base_y = tip_y + A_H; dir = -1;
+        }
+        // Scanline fill; skip the 4 widest base rows (truncated base). Tip and
+        // taper slope unchanged; shape becomes a trapezoid, 4px shorter at base.
+        for (int s = 4; s <= A_H; s++) {
+          int y = base_y + dir * s;
+          int hw = A_HALF - (A_HALF * s) / A_H;  // A_HALF at base -> 0 at tip
+          if (hw < 0) hw = 0;
+          ad.p1.x = (lv_coord_t)(mx - hw); ad.p1.y = (lv_coord_t)y;
+          ad.p2.x = (lv_coord_t)(mx + hw); ad.p2.y = (lv_coord_t)y;
+          lv_draw_line(layer, &ad);
+        }
+      }
     }
   }
-}
-
-// ============================================================
-// Create one horizontal slider row (AMENDED FOR 3PX OFFSET)
-// ============================================================
-static lv_obj_t *create_slider_row(lv_obj_t *parent, eq_stage_t *stage, int row,
-                                   const char *label_text, int range_min,
-                                   int range_max, int initial,
-                                   lv_obj_t **out_val_label) {
-  int y = SL_AREA_Y + row * SL_ROW_H + 4;
-
-  int label_y = y;
-  if (strcmp(label_text, "FREQ") == 0 || strcmp(label_text, "Q") == 0 ||
-      strcmp(label_text, "GAIN") == 0) {
-    label_y -= 3;
-  }
-
-  lv_obj_t *lbl = lv_label_create(parent);
-  lv_label_set_text(lbl, label_text);
-  lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-  lv_obj_set_pos(lbl, SL_LBL_X, label_y);
-  lv_obj_set_size(lbl, SL_LBL_W, 12);
-  lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_RIGHT, 0);
-
-  lv_obj_t *slider = lv_slider_create(parent);
-  lv_obj_set_size(slider, SL_BAR_W, 8);
-  lv_obj_set_pos(slider, SL_BAR_X, y);
-  lv_slider_set_range(slider, range_min, range_max);
-  lv_slider_set_value(slider, initial, LV_ANIM_OFF);
-  style_slider_slim(slider);
-  lv_obj_set_style_pad_all(slider, 6, LV_PART_KNOB);       // larger touch target for EQ sliders
-  lv_obj_add_flag(slider, LV_OBJ_FLAG_ADV_HITTEST);         // restrict touch to knob area only
-  lv_obj_add_event_cb(slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, stage);
-
-  lv_obj_t *vlbl = lv_label_create(parent);
-  lv_label_set_text(vlbl, "");
-  lv_obj_set_style_text_color(vlbl, COL_TEXT, 0);
-  lv_obj_set_style_text_font(vlbl, &lv_font_montserrat_10, 0);
-  lv_obj_set_pos(vlbl, SL_VAL_X, label_y);
-
-  *out_val_label = vlbl;
-  return slider;
-}
-
-// ============================================================
-// Create one band button (AMENDED FOR OPTICAL CENTERING)
-// ============================================================
-static void create_band_button(lv_obj_t *parent, eq_stage_t *stage, int idx,
-                               const char *text, const lv_font_t *font,
-                               lv_event_cb_t cb) {
-  lv_obj_t *btn = lv_obj_create(parent);
-  lv_obj_remove_style_all(btn);
-  lv_obj_set_size(btn, BB_W, BB_H);
-  lv_obj_set_style_border_width(btn, 1, 0);
-  lv_obj_set_style_border_color(btn, COL_BAND_RED, 0);
-  lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_radius(btn, 2, 0);
-  lv_obj_set_style_pad_all(btn, 0, 0);
-  lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, stage);
-
-  lv_obj_t *lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, text);
-  lv_obj_set_style_text_color(lbl, COL_BAND_RED, 0);
-  lv_obj_set_style_text_font(lbl, font, 0);
-  lv_obj_center(lbl);
-
-  if (strcmp(text, "-") == 0) {
-    lv_obj_set_style_translate_y(lbl, -2, 0);
-  } else if (strcmp(text, "+") == 0) {
-    lv_obj_set_style_translate_y(lbl, -1, 0);
-  }
-
-  stage->band_btns[idx] = btn;
-  stage->band_btn_labels[idx] = lbl;
 }
 
 // ============================================================
@@ -1981,7 +2142,7 @@ static void channel_btn_cb(lv_event_t *e) {
   }
 
   update_channel_button_style(stage);
-  sync_sliders_to_band(stage);
+  sync_band_display(stage);
   rebuild_band_buttons(stage);
   stage->curve_dirty = true;
   preset_mark_dirty();
@@ -2069,40 +2230,7 @@ static void stage_gain_snap_cb(lv_event_t *e) {
 // remapped so value 0 ≠ 0 dB, and the user is doing precision work).
 #define BAND_GAIN_SNAP_ZONE 30 // ±3.0 dB in slider units (val/10)
 #define BAND_GAIN_SNAP_MS 300  // Max press duration
-
-static uint32_t band_gain_press_time = 0;
-
-static void band_gain_snap_cb(lv_event_t *e) {
-  lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
-  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
-  lv_event_code_t code = lv_event_get_code(e);
-
-  if (code == LV_EVENT_PRESSED) {
-    band_gain_press_time = lv_tick_get();
-    return;
-  }
-
-  // LV_EVENT_RELEASED
-  if (stage->fine_mode)
-    return; // disabled in fine
-  if ((lv_tick_get() - band_gain_press_time) > BAND_GAIN_SNAP_MS)
-    return;
-
-  int val = lv_slider_get_value(slider);
-  if (val < -BAND_GAIN_SNAP_ZONE || val > BAND_GAIN_SNAP_ZONE)
-    return;
-
-  // Quick tap near zero — snap band gain to 0 dB
-  eq_band_t *b = &get_bands(stage)[stage->selected_band];
-  b->gain = 0.0f;
-  lv_slider_set_value(slider, 0, LV_ANIM_OFF);
-  update_value_labels(stage);
-  stage->curve_dirty = true;
-  mirror_band_if_linked(stage, stage->selected_band);
-  dsp_push_band(stage, stage->selected_band);
-  preset_mark_dirty();
-  update_all_preset_boxes();
-}
+// (Constants above are still used by param_slider_snap_cb and lk_tile_lock_cb.)
 
 static void stage_gain_slider_event_cb(lv_event_t *e) {
   if (updating_gain_from_mirror)
@@ -2775,8 +2903,588 @@ static void create_gain_popup(lv_obj_t *parent, eq_stage_t *stage) {
 }
 
 // ============================================================
+// Redesigned control section — FREQ/GAIN/Q rings (Stage 1)
+// ============================================================
+// UI-local formatters for the ring centre text. These differ from the shared
+// eq_data.h format_freq/format_q (which stay untouched for crossover + other
+// callers): FREQ is split into a bare number + separate unit ("Hz"/"kHz"),
+// and Q is shown to 1 decimal instead of 2.
+static void ring_fmt_value(char *buf, size_t len, int param, float val) {
+  switch (param) {
+  case 0: // FREQ: number only; unit supplied separately
+    if (val >= 1000.0f) snprintf(buf, len, "%.1f", val / 1000.0f);
+    else                snprintf(buf, len, "%.0f", val);
+    break;
+  case 1: // GAIN: signed, 1 decimal
+    snprintf(buf, len, "%+.1f", val);
+    break;
+  case 2: // Q: 1 decimal (ring UI diverges from format_q's %.2f)
+    snprintf(buf, len, "%.1f", val);
+    break;
+  default:
+    buf[0] = '\0';
+  }
+}
+
+static const char *ring_unit_str(int param, float val) {
+  switch (param) {
+  case 0: return (val >= 1000.0f) ? "kHz" : "Hz";
+  case 1: return "dB";
+  case 2: return "";
+  }
+  return "";
+}
+
+// Ring centre X for each of the 3 params.
+static inline int ring_center_x(int param) {
+  return (param == 0) ? RING_CX0 : (param == 1) ? RING_CX1 : RING_CX2;
+}
+
+// Retarget the single parameter slider to the currently selected param: set its
+// range for that param and its value from the selected band. FREQ/Q use the
+// 0..*_SLIDER_MAX integer range; GAIN uses GAIN_SLIDER_MIN..MAX. The existing
+// *_to_slider helpers handle per-param log/linear mapping and fine-mode scaling.
+static void param_slider_retarget(eq_stage_t *stage) {
+  if (!stage->param_slider_obj) return;
+  eq_band_t *b = &get_bands(stage)[stage->selected_band];
+  lv_obj_t *s = stage->param_slider_obj;
+  // Indicator colour tracks the selected band (matches ring/marker accent).
+  lv_obj_set_style_bg_color(s, band_color(stage->selected_band), LV_PART_INDICATOR);
+  // Centre tick marks 0 dB — meaningful for GAIN only.
+  if (stage->slider_center_mark) {
+    if (stage->selected_param == 1)
+      lv_obj_clear_flag(stage->slider_center_mark, LV_OBJ_FLAG_HIDDEN);
+    else
+      lv_obj_add_flag(stage->slider_center_mark, LV_OBJ_FLAG_HIDDEN);
+  }
+  switch (stage->selected_param) {
+  case 0:
+    lv_slider_set_range(s, 0, FREQ_SLIDER_MAX);
+    lv_slider_set_value(s, freq_to_slider(stage, b->freq), LV_ANIM_OFF);
+    break;
+  case 1:
+    lv_slider_set_range(s, GAIN_SLIDER_MIN, GAIN_SLIDER_MAX);
+    lv_slider_set_value(s, gain_to_slider(stage, b->gain), LV_ANIM_OFF);
+    break;
+  case 2:
+    lv_slider_set_range(s, 0, Q_SLIDER_MAX);
+    lv_slider_set_value(s, q_to_slider(stage, b->q), LV_ANIM_OFF);
+    break;
+  }
+}
+
+// Value-changed handler for the parameter slider. Writes the selected param of
+// the selected band, then does the standard commit chain (curve dirty, mirror,
+// DSP push, preset dirty) and refreshes the rings. GAIN snaps to 0 near centre
+// unless fine mode is active.
+static void param_slider_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+  lv_obj_t *s = (lv_obj_t *)lv_event_get_target(e);
+  int val = lv_slider_get_value(s);
+  eq_band_t *b = &get_bands(stage)[stage->selected_band];
+
+  fine_readout_touch(stage);   // arm/refresh fine-adjust readout (no-op if not fine)
+
+  switch (stage->selected_param) {
+  case 0:
+    b->freq = slider_to_freq(stage, val);
+    break;
+  case 1:
+    b->gain = slider_to_gain(stage, val);
+    break;
+  case 2:
+    b->q = slider_to_q(stage, val);
+    break;
+  }
+
+  stage->curve_dirty = true;
+  mirror_band_if_linked(stage, stage->selected_band);
+  dsp_push_band(stage, stage->selected_band);
+  if (stage->ring_area_obj) lv_obj_invalidate(stage->ring_area_obj);
+  preset_mark_dirty();
+  update_all_preset_boxes();
+}
+
+// Quick-tap snap-to-0 for the parameter slider, active only when GAIN is the
+// selected param and fine mode is off. A short press (< snap ms) released within
+// the centre zone snaps gain to 0 dB, using BAND_GAIN_SNAP_ZONE / _MS.
+static uint32_t param_slider_press_time = 0;
+// Tile-swipe lockout: while the param slider is held, disable the tileview's
+// own scroll so a horizontal drag adjusts the value instead of paging. Applies
+// to all params (separate from the GAIN-only snap cb). Restore on RELEASED and
+// PRESS_LOST (backstop against a stuck-disabled tileview if the press is lost).
+// Lockout container press/release: clear the tileview's own SCROLLABLE while the
+// strip is touched so a horizontal track drag doesn't page. The container gets
+// PRESSED before the tileview SCROLL_BEGIN (verified), so this pre-empts the
+// swipe — the same lever the gain popup uses on open. Restore on release/lost.
+static void lk_tile_lock_cb(lv_event_t *e) {
+  lv_event_code_t code = lv_event_get_code(e);
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+  if (!main_tileview) return;
+  if (code == LV_EVENT_PRESSED) {
+    lv_obj_clear_flag(main_tileview, LV_OBJ_FLAG_SCROLLABLE);
+    param_slider_press_time = lv_tick_get();
+    if (stage) fine_readout_touch(stage);   // arm fine readout on track press
+    return;
+  }
+  // RELEASED or PRESS_LOST
+  lv_obj_add_flag(main_tileview, LV_OBJ_FLAG_SCROLLABLE);
+  if (code != LV_EVENT_RELEASED) return;
+
+  // Quick tap near the centre line -> snap GAIN to 0 dB. Handles taps on the
+  // track (which fall through the slider's ADV_HITTEST and land here, not on
+  // the slider), so param_slider_snap_cb never sees them.
+  if (!stage || stage->selected_param != 1 || stage->fine_mode) return;
+  if ((lv_tick_get() - param_slider_press_time) > BAND_GAIN_SNAP_MS) return;
+
+  lv_indev_t *indev = lv_indev_active();
+  if (!indev) return;
+  lv_point_t pt;
+  lv_indev_get_point(indev, &pt);
+  // Snap zone: ±BAND_GAIN_SNAP_ZONE slider units mapped to px across the GAIN
+  // track (PSL_W over 300 units).
+  int zone_px = (BAND_GAIN_SNAP_ZONE * PSL_W) / 300;   // 30*464/300 = 46
+  if (pt.x < PSL_CX - zone_px || pt.x > PSL_CX + zone_px) return;
+
+  eq_band_t *b = &get_bands(stage)[stage->selected_band];
+  b->gain = 0.0f;
+  if (stage->param_slider_obj) lv_slider_set_value(stage->param_slider_obj, 0, LV_ANIM_OFF);
+  stage->curve_dirty = true;
+  mirror_band_if_linked(stage, stage->selected_band);
+  dsp_push_band(stage, stage->selected_band);
+  if (stage->ring_area_obj) lv_obj_invalidate(stage->ring_area_obj);
+  preset_mark_dirty();
+  update_all_preset_boxes();
+}
+
+static void param_slider_snap_cb(lv_event_t *e) {
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+  lv_obj_t *s = (lv_obj_t *)lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+
+  if (code == LV_EVENT_PRESSED)
+    fine_readout_touch(stage);   // all params; no-op if not fine
+
+  if (stage->selected_param != 1) return;   // GAIN only (snap logic below)
+  if (code == LV_EVENT_PRESSED) {
+    param_slider_press_time = lv_tick_get();
+    return;
+  }
+  // LV_EVENT_RELEASED
+  if (stage->fine_mode) return;
+  if ((lv_tick_get() - param_slider_press_time) > BAND_GAIN_SNAP_MS) return;
+
+  int val = lv_slider_get_value(s);
+  if (val < -BAND_GAIN_SNAP_ZONE || val > BAND_GAIN_SNAP_ZONE) return;
+
+  eq_band_t *b = &get_bands(stage)[stage->selected_band];
+  b->gain = 0.0f;
+  lv_slider_set_value(s, 0, LV_ANIM_OFF);
+  stage->curve_dirty = true;
+  mirror_band_if_linked(stage, stage->selected_band);
+  dsp_push_band(stage, stage->selected_band);
+  if (stage->ring_area_obj) lv_obj_invalidate(stage->ring_area_obj);
+  preset_mark_dirty();
+  update_all_preset_boxes();
+}
+
+// Custom draw: 3 gap-down arcs (track + accent fill), centre value+unit text,
+// and the FREQ/GAIN/Q param label below each. Runs on ring_area_obj.
+// LVGL arc angles on this build: 0=right, 90=bottom, clockwise (see the
+// RING_*_DEG defines for the header-doc discrepancy). Track drawn
+// RING_START_DEG->RING_END_DEG clockwise over the top. Fill shares the bottom
+// end (RING_END_DEG), its start sweeping in as the value's fraction grows.
+// Decimals for the fine readout, derived from the actual per-step change of the
+// slider mapping at the current position (probe slider_to_X at val±1). Capped 2.
+static int fine_readout_decimals(eq_stage_t *stage, int param) {
+  int sv, smax;
+  float here, next;
+  switch (param) {
+    case 0: smax = FREQ_SLIDER_MAX; sv = freq_to_slider(stage, get_bands(stage)[stage->selected_band].freq);
+            break;
+    case 1: smax = GAIN_SLIDER_MAX; sv = gain_to_slider(stage, get_bands(stage)[stage->selected_band].gain);
+            break;
+    default: smax = Q_SLIDER_MAX; sv = q_to_slider(stage, get_bands(stage)[stage->selected_band].q);
+            break;
+  }
+  int a = sv, bstep = (sv < smax) ? sv + 1 : sv - 1;
+  switch (param) {
+    case 0: here = slider_to_freq(stage, a); next = slider_to_freq(stage, bstep); break;
+    case 1: here = slider_to_gain(stage, a); next = slider_to_gain(stage, bstep); break;
+    default: here = slider_to_q(stage, a);   next = slider_to_q(stage, bstep);   break;
+  }
+  float step = fabsf(next - here);
+  if (step <= 0.0f) return 2;
+  // Show one digit finer than the step: dp = ceil(-log10(step)) + 0, clamped 0..2.
+  int dp = (int)ceilf(-log10f(step));
+  if (dp < 0) dp = 0;
+  if (dp > 2) dp = 2;
+  return dp;
+}
+
+// Format the fine readout value + unit for a param, at the given decimals.
+// FREQ shown in Hz (fine ranges are narrow; kHz split not needed here).
+static void fine_readout_fmt(char *vbuf, int vsz, char *ubuf, int usz,
+                             eq_stage_t *stage, int param, int dp) {
+  eq_band_t *bd = &get_bands(stage)[stage->selected_band];
+  switch (param) {
+    case 0: snprintf(vbuf, vsz, "%.*f", dp, bd->freq); snprintf(ubuf, usz, "Hz"); break;
+    case 1: snprintf(vbuf, vsz, "%+.*f", dp, bd->gain); snprintf(ubuf, usz, "dB"); break;
+    default: snprintf(vbuf, vsz, "%.*f", dp, bd->q);   snprintf(ubuf, usz, "Q");  break;
+  }
+}
+
+// Update the fine-readout overlay: set value+unit text, size to content, and
+// centre the box on the selected arc. Shows the box. No-op if not built.
+static void fine_readout_update(eq_stage_t *stage) {
+  if (!stage->fine_readout_box || !stage->fine_readout_val ||
+      !stage->fine_readout_unit)
+    return;
+  int sp = stage->selected_param;
+  int dp = fine_readout_decimals(stage, sp);
+  char vbuf[12], ubuf[4];
+  fine_readout_fmt(vbuf, sizeof(vbuf), ubuf, sizeof(ubuf), stage, sp, dp);
+  lv_label_set_text(stage->fine_readout_val, vbuf);
+  lv_label_set_text(stage->fine_readout_unit, ubuf);
+
+  lv_obj_clear_flag(stage->fine_readout_box, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_update_layout(stage->fine_readout_box);   // force content-size calc
+
+  int w = lv_obj_get_width(stage->fine_readout_box);
+  int h = lv_obj_get_height(stage->fine_readout_box);
+  int cx = ring_center_x(sp);                       // tile-absolute = screen X
+  int cy = RING_AREA_Y + RING_CY;                   // arc centre screen Y (204)
+  lv_obj_set_pos(stage->fine_readout_box, cx - w / 2, cy - h / 2);
+}
+
+static void fine_readout_hide(eq_stage_t *stage) {
+  if (stage->fine_readout_box)
+    lv_obj_add_flag(stage->fine_readout_box, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ring_area_draw_cb(lv_event_t *e) {
+  lv_layer_t *layer = lv_event_get_layer(e);
+  lv_obj_t   *obj   = (lv_obj_t *)lv_event_get_target(e);
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  int ox = coords.x1, oy = coords.y1;
+
+  eq_band_t *b = &get_bands(stage)[stage->selected_band];
+  lv_color_t accent = band_color(stage->selected_band);
+
+  // Static buffers: lv_draw_label reads the pointer after this frame returns
+  // (LVGL v9 async-draw rule, per the marker block).
+  static char ring_val_buf[3][8];
+  static char ring_unit_buf[3][6];
+  static const char *param_labels[3] = {"FREQ", "GAIN", "Q"};
+
+  for (int p = 0; p < 3; p++) {
+    float val  = get_band_param(b, p);
+    float frac = value_to_norm(p, val);
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    int cx = ox + ring_center_x(p);
+    int cy = oy + RING_CY;
+
+    // Track (dim)
+    lv_draw_arc_dsc_t adsc;
+    lv_draw_arc_dsc_init(&adsc);
+    adsc.center.x = cx;
+    adsc.center.y = cy;
+    adsc.radius   = RING_R;
+    adsc.width    = RING_STROKE;
+    adsc.color    = COL_TEXT_DIM;
+    adsc.opa      = LV_OPA_COVER;
+    adsc.start_angle = RING_START_DEG;   // 122 (just CW of bottom)
+    adsc.end_angle   = RING_END_DEG;     // 418 (=58, bottom), CW over the top
+    lv_draw_arc(layer, &adsc);
+
+    // Accent fill. FREQ/Q (unipolar): grow clockwise from the bottom-left end
+    // (RING_START_DEG) by TRACK*frac. GAIN (bipolar): anchored at top (the
+    // sweep midpoint); positive fills clockwise toward the right, negative
+    // fills counter-clockwise toward the left; nothing at gain=0.
+    if (p == 1) {
+      // GAIN bipolar. Midpoint angle = START + TRACK/2 (top of the ring).
+      int mid = RING_START_DEG + RING_TRACK_DEG / 2;   // 270
+      int half = RING_TRACK_DEG / 2;                   // 148
+      float dev = frac - 0.5f;                          // -0.5..+0.5
+      if (dev > 0.001f) {
+        adsc.color       = accent;
+        adsc.start_angle = mid;
+        adsc.end_angle   = mid + (int)(half * dev * 2.0f + 0.5f);
+        lv_draw_arc(layer, &adsc);
+      } else if (dev < -0.001f) {
+        adsc.color       = accent;
+        adsc.start_angle = mid - (int)(half * (-dev) * 2.0f + 0.5f);
+        adsc.end_angle   = mid;
+        lv_draw_arc(layer, &adsc);
+      }
+      // dev ~= 0: no fill (grey track only)
+    } else {
+      // FREQ / Q unipolar: fill grows clockwise from bottom-left.
+      if (frac > 0.001f) {
+        adsc.color       = accent;
+        adsc.start_angle = RING_START_DEG;
+        adsc.end_angle   = RING_START_DEG + (int)(RING_TRACK_DEG * frac + 0.5f);
+        lv_draw_arc(layer, &adsc);
+      }
+    }
+
+    // Centre value text (selected param brighter). Value upper-middle, unit
+    // below — offsets mirror the mockup (value ~R above centre, unit under).
+    ring_fmt_value(ring_val_buf[p], sizeof(ring_val_buf[p]), p, val);
+    snprintf(ring_unit_buf[p], sizeof(ring_unit_buf[p]), "%s",
+             ring_unit_str(p, val));
+
+    lv_draw_label_dsc_t vdsc;
+    lv_draw_label_dsc_init(&vdsc);
+    vdsc.color = (p == stage->selected_param) ? COL_WHITE : COL_TEXT_DIM;
+    vdsc.font  = &lv_font_montserrat_14;
+    vdsc.text  = ring_val_buf[p];
+    vdsc.align = LV_TEXT_ALIGN_CENTER;
+    {
+      int vh = lv_font_get_line_height(vdsc.font);
+      lv_area_t va = {(lv_coord_t)(cx - RING_R), (lv_coord_t)(cy - vh + 2),
+                      (lv_coord_t)(cx + RING_R), (lv_coord_t)(cy + 2)};
+      lv_draw_label(layer, &vdsc, &va);
+    }
+
+    // Unit line, just below the value (white when selected, else dim)
+    lv_draw_label_dsc_t udsc;
+    lv_draw_label_dsc_init(&udsc);
+    udsc.color = (p == stage->selected_param) ? COL_WHITE : COL_TEXT_DIM;
+    udsc.font  = &lv_font_montserrat_10;
+    udsc.text  = ring_unit_buf[p];
+    udsc.align = LV_TEXT_ALIGN_CENTER;
+    {
+      lv_area_t ua = {(lv_coord_t)(cx - RING_R), (lv_coord_t)(cy + 4),
+                      (lv_coord_t)(cx + RING_R), (lv_coord_t)(cy + 16)};
+      lv_draw_label(layer, &udsc, &ua);
+    }
+
+    // Selected-param indicator: 10px white rect centred in the bottom gap, on
+    // the arc's stroke centreline (cy + RING_R - RING_STROKE/2 = cy+24), 2px.
+    if (p == stage->selected_param) {
+      lv_draw_rect_dsc_t gdsc;
+      lv_draw_rect_dsc_init(&gdsc);
+      gdsc.bg_color = COL_WHITE;
+      gdsc.bg_opa   = LV_OPA_COVER;
+      int gy = cy + RING_R - RING_STROKE / 2 - 3;   // 21 (moved up 3px)
+      lv_area_t gm = {(lv_coord_t)(cx - 6), (lv_coord_t)(gy - 1),
+                      (lv_coord_t)(cx + 6), (lv_coord_t)(gy + 1)};
+      lv_draw_rect(layer, &gdsc, &gm);
+    }
+
+    // Param label (FREQ/GAIN/Q) below the ring
+    lv_draw_label_dsc_t pdsc;
+    lv_draw_label_dsc_init(&pdsc);
+    pdsc.color = (p == stage->selected_param) ? COL_WHITE : COL_TEXT_DIM;
+    pdsc.font  = &lv_font_montserrat_10;
+    pdsc.text  = param_labels[p];
+    pdsc.align = LV_TEXT_ALIGN_CENTER;
+    {
+      lv_area_t pa = {(lv_coord_t)(cx - RING_R), (lv_coord_t)(cy + RING_R + 2),
+                      (lv_coord_t)(cx + RING_R), (lv_coord_t)(cy + RING_R + 14)};
+      lv_draw_label(layer, &pdsc, &pa);
+    }
+  }
+
+  // --- Band readout: "< N >" over "BAND", left of the rings ---------------
+  // N = selected_band+1 (matches curve marker, line ~1806). Arrows are drawn
+  // static text; hit-testing lives in ring_area_click_cb. Vertical rows are
+  // shared with the ring value row (montserrat_18 number) and the FREQ/GAIN/Q
+  // param row (montserrat_10 "BAND" label), derived from RING_CY / RING_R.
+  {
+    int cy = oy + RING_CY;
+
+    // Fixed column boxes (screen-local X + area origin ox). Number box is the
+    // anchor: band_cx is pinned so shrinking the gap moves the arrows inward
+    // rather than shifting the number. Arrow boxes 12px, number box 26px
+    // (two digits at montserrat_22 — GUESS, eyeball "15" for clip), gap 1px.
+    int aw   = 16;                             // arrow box width (fits montserrat_16)
+    int nw   = 26;                             // number box width
+    int band_cx = ox + BAND_RO_ARROW_X0 + 28;
+    int nx0  = band_cx - nw / 2;               // number box left (derived)
+    // Arrow inner edges sit BAND_RO_ARROW_INSET px outside the number box.
+    int ax0  = (nx0 - BAND_RO_ARROW_INSET) - aw;   // '<' box left
+    int rx0  = nx0 + nw + BAND_RO_ARROW_INSET;     // '>' box left
+    // Box spans '<' outer to '>' outer, +1px pad each side.
+    int box_x0 = ax0 - 1;
+    int box_x1 = rx0 + aw + 1;
+
+    // Number row: vertically centred on the ring value text row (cy-relative).
+    // Ring value box is (cy - vh + 2 .. cy + 2); reuse that band for the number.
+    int nvh = lv_font_get_line_height(&lv_font_montserrat_22);
+    int nrow_y0 = cy - nvh + 2 + BAND_RO_ROW_DY;
+    int nrow_y1 = cy + 2 + BAND_RO_ROW_DY;
+    // Arrow row: vertically centred to the number using its own line height.
+    int avh = lv_font_get_line_height(&lv_font_montserrat_16);
+    int arow_y0 = (nrow_y0 + nrow_y1) / 2 - avh / 2;
+    int arow_y1 = arow_y0 + avh;
+
+    // Light-grey rounded box behind the assembly. Height = arc height (2*RING_R),
+    // centred on the arc centre Y. Width spans the arrows +1px pad (box_x0/x1).
+    {
+      lv_draw_rect_dsc_t boxd;
+      lv_draw_rect_dsc_init(&boxd);
+      boxd.bg_color = lv_color_hex(0x141414);   // neutral, slightly lighter than black bg
+      boxd.bg_opa   = LV_OPA_COVER;
+      boxd.radius   = 3;
+      lv_area_t boxa = {(lv_coord_t)box_x0, (lv_coord_t)(cy - RING_R),
+                        (lv_coord_t)box_x1, (lv_coord_t)(cy + RING_R - 4)};
+      lv_draw_rect(layer, &boxd, &boxa);
+    }
+
+    static char band_num_buf[4];
+    snprintf(band_num_buf, sizeof(band_num_buf), "%d", stage->selected_band + 1);
+
+    // Number (accent colour of the selected band, montserrat_22, centred)
+    lv_draw_label_dsc_t ndsc;
+    lv_draw_label_dsc_init(&ndsc);
+    ndsc.color = accent;
+    ndsc.font  = &lv_font_montserrat_22;
+    ndsc.text  = band_num_buf;
+    ndsc.align = LV_TEXT_ALIGN_CENTER;
+    {
+      lv_area_t na = {(lv_coord_t)nx0, (lv_coord_t)nrow_y0,
+                      (lv_coord_t)(nx0 + nw), (lv_coord_t)nrow_y1};
+      lv_draw_label(layer, &ndsc, &na);
+    }
+
+    // Arrows (white, montserrat_16, centred in their boxes)
+    lv_draw_label_dsc_t adsc2;
+    lv_draw_label_dsc_init(&adsc2);
+    adsc2.color = COL_WHITE;
+    adsc2.font  = &lv_font_montserrat_16;
+    adsc2.align = LV_TEXT_ALIGN_CENTER;
+    static const char *lt = "<";
+    static const char *gt = ">";
+    adsc2.text = (char *)lt;
+    {
+      lv_area_t la = {(lv_coord_t)ax0, (lv_coord_t)arow_y0,
+                      (lv_coord_t)(ax0 + aw), (lv_coord_t)arow_y1};
+      lv_draw_label(layer, &adsc2, &la);
+    }
+    adsc2.text = (char *)gt;
+    {
+      lv_area_t ga = {(lv_coord_t)rx0, (lv_coord_t)arow_y0,
+                      (lv_coord_t)(rx0 + aw), (lv_coord_t)arow_y1};
+      lv_draw_label(layer, &adsc2, &ga);
+    }
+
+    // "BAND" label on the param row (montserrat_10, dim, centred on the number)
+    lv_draw_label_dsc_t bdsc;
+    lv_draw_label_dsc_init(&bdsc);
+    bdsc.color = COL_TEXT_DIM;
+    bdsc.font  = &lv_font_montserrat_10;
+    bdsc.text  = (char *)"BAND";
+    bdsc.align = LV_TEXT_ALIGN_CENTER;
+    {
+      lv_area_t ba = {(lv_coord_t)(band_cx - RING_R), (lv_coord_t)(cy + RING_R + 2),
+                      (lv_coord_t)(band_cx + RING_R), (lv_coord_t)(cy + RING_R + 14)};
+      lv_draw_label(layer, &bdsc, &ba);
+    }
+  }
+}
+
+// Tap a ring to select that parameter (drives the slider in a later stage).
+// Hit-test by X against each ring centre, mirroring curve_area_click_cb.
+static void ring_area_click_cb(lv_event_t *e) {
+  eq_stage_t *stage = (eq_stage_t *)lv_event_get_user_data(e);
+  lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+  lv_indev_t *indev = lv_indev_active();
+  if (!indev) return;
+
+  lv_point_t pt;
+  lv_indev_get_point(indev, &pt);
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  int lx = pt.x - coords.x1;   // local X within ring area
+  int ly = pt.y - coords.y1;   // local Y within ring area
+
+  // Band readout "< N >" hit-test (mirrors the draw geometry above). Column
+  // spans local X [BAND_RO_ARROW_X0 .. rx_end], split at the number centre:
+  // left half -> previous active band, right half -> next, wrapping per the
+  // active channel's band count. Vertical band = RING_CY +/- BAND_RO_TAP_VPAD.
+  {
+    const int aw = 16, nw = 26;
+    const int band_cx = BAND_RO_ARROW_X0 + 28;            // pinned centre (matches draw)
+    const int nx0     = band_cx - nw / 2;                 // number left
+    const int ax0     = (nx0 - BAND_RO_ARROW_INSET) - aw; // '<' left
+    const int rx_end  = (nx0 + nw + BAND_RO_ARROW_INSET) + aw;  // '>' right edge
+    // Tap zone widened 10px each side beyond the drawn glyph column.
+    if (lx >= ax0 - 10 && lx <= rx_end + 10 &&
+        ly >= RING_CY + BAND_RO_ROW_DY - BAND_RO_TAP_VPAD &&
+        ly <= RING_CY + BAND_RO_ROW_DY + BAND_RO_TAP_VPAD) {
+      int n = eq_ui_get_band_count(stage);
+      if (n > 0) {
+        int cur = stage->selected_band;
+        int nxt = (lx < band_cx) ? (cur - 1 + n) % n : (cur + 1) % n;
+        eq_ui_select_band(stage, nxt);
+        lv_obj_invalidate(obj);
+      }
+      return;
+    }
+  }
+
+  // Radial hit-test: select a ring if the tap falls within its inner circle
+  // (radius = arc inner edge, RING_R - RING_STROKE). Full circle, including
+  // across the bottom gap. Centre Y is RING_CY within the area.
+  const int inner_r = RING_R - RING_STROKE;   // 22
+  const int inner_r2 = inner_r * inner_r;
+  int best = -1;
+  for (int p = 0; p < 3; p++) {
+    int dx = lx - ring_center_x(p);
+    int dy = ly - RING_CY;
+    if (dx * dx + dy * dy <= inner_r2) { best = p; break; }
+  }
+  if (best >= 0) {
+    stage->selected_param = best;
+    lv_obj_invalidate(obj);
+    param_slider_retarget(stage);
+  }
+}
+
+// ============================================================
 // Build a single EQ page inside a parent container
 // ============================================================
+// Nav button geometry (shared by EQ/config/xover). Column at x = SCREEN_W-40,
+// three 34x17 slots 4px apart. Top slot (NAV_Y0) is MUTE on EQ, empty elsewhere.
+// Middle (NAV_Y1) = CFG or RET; bottom (NAV_Y2) = VIS. VIS pinned across pages.
+#define NAV_BTN_W  34
+#define NAV_BTN_H  17
+#define NAV_BTN_X  (SCREEN_W - 40)
+#define NAV_Y0     (STAGE_GAIN_SL_Y + STAGE_GAIN_SL_H + 18)   // 182 (mute row)
+#define NAV_Y1     (NAV_Y0 + NAV_BTN_H + 4)                   // 203
+#define NAV_Y2     (NAV_Y1 + NAV_BTN_H + 4)                   // 224
+
+// Create a solid nav button with a near-black label at (NAV_BTN_X, y).
+static lv_obj_t *create_nav_button(lv_obj_t *parent, int y, const char *label,
+                                   lv_event_cb_t cb) {
+  lv_obj_t *b = lv_obj_create(parent);
+  lv_obj_remove_style_all(b);
+  lv_obj_set_size(b, NAV_BTN_W, NAV_BTN_H);
+  lv_obj_set_pos(b, NAV_BTN_X, y);
+  lv_obj_set_style_bg_color(b, COL_BOX_LIST, 0);
+  lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(b, 2, 0);
+  lv_obj_set_style_pad_all(b, 0, 0);
+  lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *lbl = lv_label_create(b);
+  lv_label_set_text(lbl, label);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0x1A1A1A), 0);
+  lv_obj_center(lbl);
+  return b;
+}
+
 static void create_eq_page(lv_obj_t *parent, eq_stage_t *stage) {
   // --- Level meter area (left of curve) ---
   lv_obj_t *meter_area_obj = lv_obj_create(parent);
@@ -2807,6 +3515,109 @@ static void create_eq_page(lv_obj_t *parent, eq_stage_t *stage) {
   stage->curve_area_obj = curve_area_obj;
 
   recompute_curve(stage);
+
+  // --- Ring control area (Stage 1 redesign) ---
+  // Transparent full-width object below the curve carrying the custom-drawn
+  // FREQ/GAIN/Q rings. Clickable for ring tap-to-select; SCROLLABLE cleared so
+  // tileview swipes still work (same pattern as curve_area_obj).
+  stage->selected_param = 0;
+  {
+    lv_obj_t *ring_area = lv_obj_create(parent);
+    lv_obj_remove_style_all(ring_area);
+    lv_obj_set_size(ring_area, RING_AREA_W, RING_AREA_H);
+    lv_obj_set_pos(ring_area, RING_AREA_X, RING_AREA_Y);
+    lv_obj_set_style_bg_opa(ring_area, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(ring_area, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ring_area, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ring_area, ring_area_draw_cb, LV_EVENT_DRAW_MAIN_END,
+                        stage);
+    lv_obj_add_event_cb(ring_area, ring_area_click_cb, LV_EVENT_CLICKED, stage);
+    stage->ring_area_obj = ring_area;
+  }
+
+  // --- Parameter slider (Stage 2) ---
+  // Single slider driving whichever ring param is selected. Range + value are
+  // set by param_slider_retarget() on ring-tap and band-select. Snap-to-0 for
+  // GAIN via param_slider_snap_cb (quick tap, fine mode off).
+  {
+    // Lockout container over the bottom strip. CLICKABLE so it wins the touch
+    // hit-test across the whole strip (incl. the slider track, which ADV_HITTEST
+    // would otherwise let fall through to the tileview scroll). SCROLLABLE +
+    // GESTURE_BUBBLE cleared so it absorbs the horizontal drag instead of paging.
+    // Transparent. Slider + tick are children; a track touch lands on the
+    // container (no value jump), a knob touch still reaches the slider.
+    lv_obj_t *lk = lv_obj_create(parent);
+    lv_obj_remove_style_all(lk);
+    lv_obj_set_size(lk, PSLK_W, PSLK_H);
+    lv_obj_set_pos(lk, PSLK_X, PSLK_Y);
+    lv_obj_set_style_bg_opa(lk, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(lk, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(lk, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(lk, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lk, lk_tile_lock_cb, LV_EVENT_PRESSED, stage);
+    lv_obj_add_event_cb(lk, lk_tile_lock_cb, LV_EVENT_RELEASED, stage);
+    lv_obj_add_event_cb(lk, lk_tile_lock_cb, LV_EVENT_PRESS_LOST, stage);
+
+    // Centre tick first, so the knob renders over it. Vertical line pokes past
+    // the knob top/bottom. Shown only for GAIN (toggled in param_slider_retarget).
+    // Positions are container-local (container x=0 so local x = screen x; y -PSLK_Y).
+    lv_obj_t *tick = lv_obj_create(lk);
+    lv_obj_remove_style_all(tick);
+    lv_obj_set_size(tick, PSL_TICK_W, 2 * PSL_TICK_HALF);
+    lv_obj_set_pos(tick, PSL_CX - PSL_TICK_W / 2, (PSL_TICK_CY - PSL_TICK_HALF) - PSLK_Y);
+    lv_obj_set_style_bg_color(tick, COL_TEXT_DIM, 0);
+    lv_obj_set_style_bg_opa(tick, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(tick, 0, 0);
+    lv_obj_clear_flag(tick, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);   // shown for GAIN only
+    stage->slider_center_mark = tick;
+
+    lv_obj_t *psl = lv_slider_create(lk);
+    lv_obj_set_size(psl, PSL_W, PSL_H);
+    lv_obj_set_pos(psl, PSL_X - PSLK_X, PSL_Y - PSLK_Y);   // container-local
+    lv_slider_set_range(psl, 0, FREQ_SLIDER_MAX);   // retarget sets real range
+    style_slider_slim(psl);
+    lv_obj_set_style_pad_all(psl, 6, LV_PART_KNOB);
+    lv_obj_add_flag(psl, LV_OBJ_FLAG_ADV_HITTEST);
+    lv_obj_add_event_cb(psl, param_slider_cb, LV_EVENT_VALUE_CHANGED, stage);
+    lv_obj_add_event_cb(psl, param_slider_snap_cb, LV_EVENT_PRESSED, stage);
+    lv_obj_add_event_cb(psl, param_slider_snap_cb, LV_EVENT_RELEASED, stage);
+    stage->param_slider_obj = psl;
+  }
+  param_slider_retarget(stage);
+
+  // --- Fine-adjust readout overlay: flex-column box (content-sized, translucent
+  // black, 4px pad) with a 24pt value label + 18pt unit label. Parented to the
+  // tile so it renders above the ring area; positioned/shown on fine adjust,
+  // hidden otherwise. LV_USE_FLEX confirmed enabled in lv_conf.h.
+  {
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(box, 194, 0);   // 76% opaque (was LV_OPA_70=70%; -20% rel transparency)
+    lv_obj_set_style_radius(box, 3, 0);
+    lv_obj_set_style_pad_all(box, 4, 0);
+    lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(box, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *vlbl = lv_label_create(box);
+    lv_obj_set_style_text_color(vlbl, COL_WHITE, 0);
+    lv_obj_set_style_text_font(vlbl, &lv_font_montserrat_24, 0);
+    lv_label_set_text(vlbl, "");
+
+    lv_obj_t *ulbl = lv_label_create(box);
+    lv_obj_set_style_text_color(ulbl, COL_WHITE, 0);
+    lv_obj_set_style_text_font(ulbl, &lv_font_montserrat_18, 0);
+    lv_label_set_text(ulbl, "");
+
+    stage->fine_readout_box  = box;
+    stage->fine_readout_val  = vlbl;
+    stage->fine_readout_unit = ulbl;
+  }
 
   // --- Filter-list "LIST" button (Phase 12) ---
   // Small button at bottom-right of curve area, just above the "20k" freq
@@ -2982,52 +3793,46 @@ static void create_eq_page(lv_obj_t *parent, eq_stage_t *stage) {
     }, LV_EVENT_ALL, stage);
   }
 
-  // --- Three horizontal band parameter sliders ---
-  stage->freq_slider_obj = create_slider_row(
-      parent, stage, 0, "FREQ", 0, FREQ_SLIDER_MAX,
-      freq_to_slider(stage, get_bands(stage)[0].freq), &stage->freq_val_label);
+  // --- Band parameter sliders removed (ring redesign) ---
+  // FREQ/GAIN/Q are now shown and edited via the rings + static slider. Null
+  // the old field pointers so sync_band_display's null-guarded paths stay safe.
+  stage->freq_slider_obj = NULL;
+  stage->q_slider_obj = NULL;
+  stage->band_gain_slider_obj = NULL;
+  stage->freq_val_label = NULL;
+  stage->q_val_label = NULL;
+  stage->band_gain_val_label = NULL;
 
-  stage->q_slider_obj = create_slider_row(
-      parent, stage, 1, "Q", 0, Q_SLIDER_MAX,
-      q_to_slider(stage, get_bands(stage)[0].q), &stage->q_val_label);
+  sync_band_display(stage);
 
-  stage->band_gain_slider_obj = create_slider_row(
-      parent, stage, 2, "GAIN", GAIN_SLIDER_MIN, GAIN_SLIDER_MAX,
-      gain_to_slider(stage, get_bands(stage)[0].gain),
-      &stage->band_gain_val_label);
-  lv_slider_set_mode(stage->band_gain_slider_obj, LV_SLIDER_MODE_SYMMETRICAL);
-  lv_obj_add_event_cb(stage->band_gain_slider_obj, band_gain_snap_cb,
-                      LV_EVENT_PRESSED, stage);
-  lv_obj_add_event_cb(stage->band_gain_slider_obj, band_gain_snap_cb,
-                      LV_EVENT_RELEASED, stage);
+  // --- FINE circle (custom-drawn ring, flashing orange inner when active) ---
+  // Sits in the gap between the Q ring and the button column. Area is padded
+  // (2*(FINE_R+FINE_MARGIN)) so the stroke+AA isn't clipped; draw cb centres on it.
+  stage->fine_circle = lv_obj_create(parent);
+  lv_obj_remove_style_all(stage->fine_circle);
+  lv_obj_set_size(stage->fine_circle, 2 * (FINE_R + FINE_MARGIN), 2 * (FINE_R + FINE_MARGIN));
+  lv_obj_set_pos(stage->fine_circle, FINE_CX - FINE_R - FINE_MARGIN, FINE_CY - FINE_R - FINE_MARGIN);
+  lv_obj_set_style_bg_opa(stage->fine_circle, LV_OPA_TRANSP, 0);
+  lv_obj_add_flag(stage->fine_circle, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(stage->fine_circle, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(stage->fine_circle, fine_btn_cb, LV_EVENT_CLICKED, stage);
+  lv_obj_add_event_cb(stage->fine_circle, fine_circle_draw_cb, LV_EVENT_DRAW_POST, stage);
 
-  sync_sliders_to_band(stage);
-
-  // --- FINE toggle button (right side of slider area) ---
-  stage->fine_btn = lv_obj_create(parent);
-  lv_obj_remove_style_all(stage->fine_btn);
-  lv_obj_set_size(stage->fine_btn, 34, 22);
-  // Aligned with FREQ slider baseline (+5px to clear gain readout labels)
-  lv_obj_set_pos(stage->fine_btn, SCREEN_W - 40, SL_AREA_Y + 0 * SL_ROW_H - 4 + 32 + 5);
-  lv_obj_set_style_bg_color(stage->fine_btn, COL_BOX_LIST, 0);
-  lv_obj_set_style_bg_opa(stage->fine_btn, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(stage->fine_btn, 2, 0);
-  lv_obj_set_style_pad_all(stage->fine_btn, 0, 0);
-  lv_obj_add_flag(stage->fine_btn, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(stage->fine_btn, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(stage->fine_btn, fine_btn_cb, LV_EVENT_CLICKED, stage);
-
-  stage->fine_btn_label = lv_label_create(stage->fine_btn);
-  lv_label_set_text(stage->fine_btn_label, "FINE");
-  lv_obj_set_style_text_font(stage->fine_btn_label, &lv_font_montserrat_12, 0);
-  lv_obj_set_style_text_color(stage->fine_btn_label, COL_WHITE, 0);
-  lv_obj_center(stage->fine_btn_label);
+  // "FINE ADJ" label on the ring param-label row (same Y/font/colour as
+  // FREQ/GAIN/Q: RING_AREA_Y+RING_CY+RING_R+2).
+  stage->fine_label = lv_label_create(parent);
+  lv_label_set_text(stage->fine_label, "FINE ADJ");
+  lv_obj_set_style_text_font(stage->fine_label, &lv_font_montserrat_10, 0);
+  lv_obj_set_style_text_color(stage->fine_label, COL_TEXT_DIM, 0);
+  lv_obj_set_style_text_align(stage->fine_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(stage->fine_label, FINE_CX - 24, RING_AREA_Y + RING_CY + RING_R + 2);
+  lv_obj_set_width(stage->fine_label, 48);
 
   // --- MUTE button — 20×12, centred below the stage gain sliders ---
   #define MUTE_BTN_W 34
-  #define MUTE_BTN_H 20
+  #define MUTE_BTN_H 17
   #define MUTE_BTN_X (SCREEN_W - 40)
-  #define MUTE_BTN_Y (STAGE_GAIN_SL_Y + STAGE_GAIN_SL_H + 19)  // +5px for readout labels
+  #define MUTE_BTN_Y NAV_Y0   // mute occupies the top nav slot on EQ pages
   stage->mute_btn = lv_obj_create(parent);
   stage->mute_flash_state = false;
   lv_obj_remove_style_all(stage->mute_btn);
@@ -3042,81 +3847,56 @@ static void create_eq_page(lv_obj_t *parent, eq_stage_t *stage) {
   lv_obj_add_event_cb(stage->mute_btn, mute_btn_cb,  LV_EVENT_CLICKED,   stage);
   lv_obj_add_event_cb(stage->mute_btn, mute_draw_cb, LV_EVENT_DRAW_POST, stage);
 
-  // --- LSH / HSH shelf buttons — bottom row, fixed at RHS of band area ---
-  stage->lsh_btn = lv_obj_create(parent);
-  lv_obj_remove_style_all(stage->lsh_btn);
-  lv_obj_set_size(stage->lsh_btn, BB_SHF_W, 22);
-  lv_obj_set_pos(stage->lsh_btn, BB_LSH_X, BB_ROW_Y - 2);
-  lv_obj_set_style_border_width(stage->lsh_btn, 1, 0);
-  lv_obj_set_style_border_color(stage->lsh_btn, COL_TEXT_DIM, 0);
-  lv_obj_set_style_bg_opa(stage->lsh_btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_radius(stage->lsh_btn, 2, 0);
-  lv_obj_set_style_pad_all(stage->lsh_btn, 0, 0);
-  lv_obj_add_flag(stage->lsh_btn, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(stage->lsh_btn, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(stage->lsh_btn, lsh_btn_cb,  LV_EVENT_CLICKED,   stage);
-  lv_obj_add_event_cb(stage->lsh_btn, lsh_draw_cb, LV_EVENT_DRAW_POST, stage);
+  // Nav buttons: CFG (middle) jumps to config, VIS (bottom) to spectrum.
+  create_nav_button(parent, NAV_Y1, "CFG", nav_cfg_cb);
+  create_nav_button(parent, NAV_Y2, "VIS", nav_vis_cb);
 
-  stage->hsh_btn = lv_obj_create(parent);
-  lv_obj_remove_style_all(stage->hsh_btn);
-  lv_obj_set_size(stage->hsh_btn, BB_SHF_W, 22);
-  lv_obj_set_pos(stage->hsh_btn, BB_HSH_X, BB_ROW_Y - 2);
-  lv_obj_set_style_border_width(stage->hsh_btn, 1, 0);
-  lv_obj_set_style_border_color(stage->hsh_btn, COL_TEXT_DIM, 0);
-  lv_obj_set_style_bg_opa(stage->hsh_btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_radius(stage->hsh_btn, 2, 0);
-  lv_obj_set_style_pad_all(stage->hsh_btn, 0, 0);
-  lv_obj_add_flag(stage->hsh_btn, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(stage->hsh_btn, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(stage->hsh_btn, hsh_btn_cb,  LV_EVENT_CLICKED,   stage);
-  lv_obj_add_event_cb(stage->hsh_btn, hsh_draw_cb, LV_EVENT_DRAW_POST, stage);
+  // --- Old bottom row removed (shelf LSH/HSH, band-ID buttons) ---
+  // Band selection remains available via curve tap + BAND-readout arrows.
+  // Null the pointers so the null-guarded style/update paths stay safe.
+  stage->lsh_btn = NULL;
+  stage->hsh_btn = NULL;
 
-  // --- Band selection buttons ---
-  for (int i = 0; i < MAX_BANDS; i++) {
-    char txt[4];
-    snprintf(txt, sizeof(txt), "%d", i + 1);
-    create_band_button(parent, stage, i, txt, &lv_font_montserrat_18,
-                       band_btn_cb);
+  // --- Right-hand solid button column: DEL / ADD / BELL ---
+  // Right edge pinned to the graph right border. Solid fill, black text, no
+  // state recolour (handlers self-guard: ADD no-ops at MAX_BANDS, DEL at 1).
+  struct { lv_obj_t **btn; lv_obj_t **lbl; int y; lv_color_t col;
+           const char *txt; lv_event_cb_t cb; } rbtns[] = {
+    { &stage->del_band_btn, NULL,                   RBTN_DEL_Y,   RBTN_COL_DEL,   "DEL BAND", remove_band_cb },
+    { &stage->add_band_btn, NULL,                   RBTN_ADD_Y,   RBTN_COL_ADD,   "ADD BAND", add_band_cb    },
+    { &stage->shape_btn,    &stage->shape_btn_label, RBTN_SHAPE_Y, RBTN_COL_SHAPE, "BELL",    shape_btn_cb   },
+  };
+  for (unsigned i = 0; i < sizeof(rbtns) / sizeof(rbtns[0]); i++) {
+    lv_obj_t *b = lv_obj_create(parent);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, RBTN_W, RBTN_H);
+    lv_obj_set_pos(b, RBTN_X, rbtns[i].y);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(b, rbtns[i].col, 0);
+    lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_border_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(b, 3, 0);
+    lv_obj_set_style_pad_all(b, 0, 0);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(b, rbtns[i].cb, LV_EVENT_CLICKED, stage);
+
+    lv_obj_t *lbl = lv_label_create(b);
+    lv_label_set_text(lbl, rbtns[i].txt);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl, rbtns[i].col, 0);
+    lv_obj_center(lbl);
+
+    *rbtns[i].btn = b;
+    if (rbtns[i].lbl) *rbtns[i].lbl = lbl;
   }
-
-  // --- DEL / ADD — fixed buttons at bottom-left, side by side ---
-  stage->del_band_btn = lv_obj_create(parent);
-  lv_obj_remove_style_all(stage->del_band_btn);
-  lv_obj_set_size(stage->del_band_btn, BB_BTN_W, 22);
-  lv_obj_set_pos(stage->del_band_btn, BB_DEL_X, BB_ROW_Y - 2);
-  lv_obj_set_style_border_width(stage->del_band_btn, 1, 0);
-  lv_obj_set_style_border_color(stage->del_band_btn, lv_color_hex(0xFF5555), 0);
-  lv_obj_set_style_bg_opa(stage->del_band_btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_radius(stage->del_band_btn, 2, 0);
-  lv_obj_add_flag(stage->del_band_btn, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(stage->del_band_btn, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(stage->del_band_btn, remove_band_cb, LV_EVENT_CLICKED,
-                      stage);
-  lv_obj_t *del_lbl = lv_label_create(stage->del_band_btn);
-  lv_label_set_text(del_lbl, "DEL");
-  lv_obj_set_style_text_font(del_lbl, &lv_font_montserrat_10, 0);
-  lv_obj_set_style_text_color(del_lbl, lv_color_hex(0xFF5555), 0);
-  lv_obj_center(del_lbl);
-
-  stage->add_band_btn = lv_obj_create(parent);
-  lv_obj_remove_style_all(stage->add_band_btn);
-  lv_obj_set_size(stage->add_band_btn, BB_BTN_W, 22);
-  lv_obj_set_pos(stage->add_band_btn, BB_ADD_X, BB_ROW_Y - 2);
-  lv_obj_set_style_border_width(stage->add_band_btn, 1, 0);
-  lv_obj_set_style_border_color(stage->add_band_btn, lv_color_hex(0x55CC55), 0);
-  lv_obj_set_style_bg_opa(stage->add_band_btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_radius(stage->add_band_btn, 2, 0);
-  lv_obj_add_flag(stage->add_band_btn, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(stage->add_band_btn, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(stage->add_band_btn, add_band_cb, LV_EVENT_CLICKED,
-                      stage);
-  lv_obj_t *add_lbl = lv_label_create(stage->add_band_btn);
-  lv_label_set_text(add_lbl, "ADD");
-  lv_obj_set_style_text_font(add_lbl, &lv_font_montserrat_10, 0);
-  lv_obj_set_style_text_color(add_lbl, lv_color_hex(0x55CC55), 0);
-  lv_obj_center(add_lbl);
-
-  rebuild_band_buttons(stage);
+  update_shape_button_label(stage);  // set BELL/LO SHLF/HI SHLF to match band
+  if (stage->shape_btn)
+    lv_obj_add_event_cb(stage->shape_btn, shape_btn_draw_cb, LV_EVENT_DRAW_MAIN_END, stage);
+  for (int i = 0; i < MAX_BANDS; i++) {
+    stage->band_btns[i] = NULL;
+    stage->band_btn_labels[i] = NULL;
+  }
 
   // --- Channel selection buttons (L / R / Lk) in bottom-left of graph ---
   stage->ch_l_btn = create_ch_button(parent, stage, 0, "L");
@@ -3174,6 +3954,205 @@ static void config_low_limiter_switch_cb(lv_event_t *e) {
 }
 
 // Phase 13: Test signal mode dropdown callback
+// ============================================================
+// Adjustable-sine tone panel
+// ============================================================
+// Screen-level translucent overlay shown on EQ/xover while the ADJ SINE test
+// source is active. Carries freq display + wide freq slider, level slider,
+// COARSE/FINE toggle, and an X to dismiss. Swipe is disabled while active.
+
+static void tone_freq_update_label(void) {
+  if (!sys_config.tone_freq_val_label) return;
+  char buf[16];
+  // Unit merged into the string, same font: integer Hz below 1k, else kHz 2dp.
+  if (sys_config.tone_freq_hz < 1000.0f)
+    snprintf(buf, sizeof(buf), "%dHz", (int)(sys_config.tone_freq_hz + 0.5f));
+  else
+    snprintf(buf, sizeof(buf), "%.2fkHz", sys_config.tone_freq_hz / 1000.0f);
+  lv_label_set_text(sys_config.tone_freq_val_label, buf);
+}
+
+static void tone_freq_slider_cb(lv_event_t *e) {
+  lv_obj_t *s = (lv_obj_t *)lv_event_get_target(e);
+  int val = lv_slider_get_value(s);
+  sys_config.tone_freq_hz = tone_slider_to_freq(val);
+  dsp_set_tone_freq(sys_config.tone_freq_hz);
+  tone_freq_update_label();
+}
+
+static void tone_level_slider_cb(lv_event_t *e) {
+  lv_obj_t *s = (lv_obj_t *)lv_event_get_target(e);
+  int val = lv_slider_get_value(s);
+  sys_config.tone_level_db = (float)val / 10.0f;   // -600..0 -> -60..0 dB
+  dsp_set_tone_level(sys_config.tone_level_db);
+  if (sys_config.tone_level_val_label) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1fdB", sys_config.tone_level_db);
+    lv_label_set_text(sys_config.tone_level_val_label, buf);
+  }
+}
+
+// COARSE/FINE toggle: fine snapshots current freq into a +/- octave window
+// (freq/2 .. freq*2), mirroring the EQ fine behaviour.
+static void tone_cf_btn_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  sys_config.tone_fine_mode = !sys_config.tone_fine_mode;
+  if (sys_config.tone_fine_mode) {
+    sys_config.tone_fine_lo = sys_config.tone_freq_hz * 0.5f;
+    sys_config.tone_fine_hi = sys_config.tone_freq_hz * 2.0f;
+  }
+  if (sys_config.tone_cf_btn_label)
+    lv_label_set_text(sys_config.tone_cf_btn_label,
+                      sys_config.tone_fine_mode ? "FINE" : "COARSE");
+  // Re-seat the slider knob for the new mapping at the current freq.
+  if (sys_config.tone_freq_slider)
+    lv_slider_set_value(sys_config.tone_freq_slider,
+                        tone_freq_to_slider(sys_config.tone_freq_hz), LV_ANIM_OFF);
+}
+
+static void tone_panel_close(void) {
+  sys_config.tone_active = false;
+  if (sys_config.tone_panel)
+    lv_obj_add_flag(sys_config.tone_panel, LV_OBJ_FLAG_HIDDEN);
+  dsp_set_input_source(DSP_INPUT_I2S);   // restore normal input
+  if (main_tileview)
+    lv_obj_add_flag(main_tileview, LV_OBJ_FLAG_SCROLLABLE);  // restore swipe
+  // Reset the dropdown selection to OFF to reflect tone-off.
+  if (sys_config.test_signal_dropdown) {
+    lv_dropdown_set_selected(sys_config.test_signal_dropdown, 0);
+    sys_config.test_signal_mode = 0;
+  }
+}
+
+static void tone_x_btn_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  tone_panel_close();   // stays on the current EQ/xover tile
+}
+
+static void tone_panel_open(void) {
+  if (!sys_config.tone_panel) return;
+  sys_config.tone_active = true;
+
+  // Defaults on open: 1 kHz, -40 dB, coarse.
+  sys_config.tone_freq_hz = 1000.0f;
+  sys_config.tone_level_db = -40.0f;
+  sys_config.tone_fine_mode = false;
+  dsp_set_tone_freq(sys_config.tone_freq_hz);
+  dsp_set_tone_level(sys_config.tone_level_db);
+
+  if (sys_config.tone_cf_btn_label)
+    lv_label_set_text(sys_config.tone_cf_btn_label, "COARSE");
+  if (sys_config.tone_freq_slider)
+    lv_slider_set_value(sys_config.tone_freq_slider,
+                        tone_freq_to_slider(sys_config.tone_freq_hz), LV_ANIM_OFF);
+  if (sys_config.tone_level_slider)
+    lv_slider_set_value(sys_config.tone_level_slider,
+                        (int)(sys_config.tone_level_db * 10), LV_ANIM_OFF);
+  if (sys_config.tone_level_val_label) {
+    char lbuf[16];
+    snprintf(lbuf, sizeof(lbuf), "%.1fdB", sys_config.tone_level_db);
+    lv_label_set_text(sys_config.tone_level_val_label, lbuf);
+  }
+  tone_freq_update_label();
+
+  lv_obj_move_foreground(sys_config.tone_panel);
+  lv_obj_clear_flag(sys_config.tone_panel, LV_OBJ_FLAG_HIDDEN);
+  if (main_tileview)
+    lv_obj_clear_flag(main_tileview, LV_OBJ_FLAG_SCROLLABLE);  // disable swipe
+}
+
+// Build the tone panel once, on the top layer so it floats above any tile.
+// Positions/sizes are first-pass (flagged for tuning). Full width, ~graph
+// height, translucent so the EQ page shows faintly through.
+static void create_tone_panel(void) {
+  lv_obj_t *scr = lv_layer_top();   // top layer floats above the tileview
+  lv_obj_t *p = lv_obj_create(scr);
+  lv_obj_remove_style_all(p);
+  lv_obj_set_size(p, SCREEN_W, CURVE_H);            // full width, graph height
+  lv_obj_set_pos(p, 0, CURVE_Y);                    // aligned to graph top
+  lv_obj_set_style_bg_color(p, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(p, 198, 0);               // translucent (flag: tune)
+  lv_obj_set_style_radius(p, 0, 0);
+  lv_obj_set_style_pad_all(p, 0, 0);
+  lv_obj_add_flag(p, LV_OBJ_FLAG_CLICKABLE);        // absorb touches to the page beneath
+  lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+  sys_config.tone_panel = p;
+
+  // Freq + unit, single montserrat_24 label (e.g. "2.82kHz").
+  lv_obj_t *fv = lv_label_create(p);
+  lv_obj_set_style_text_font(fv, &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(fv, COL_WHITE, 0);
+  lv_label_set_text(fv, "1000Hz");
+  lv_obj_set_pos(fv, 70, 34);                       // flag: tune
+  sys_config.tone_freq_val_label = fv;
+
+  // Wide freq slider along the bottom of the panel.
+  lv_obj_t *fs = lv_slider_create(p);
+  lv_obj_set_size(fs, SCREEN_W - 40, 8);
+  lv_obj_set_pos(fs, 20, CURVE_H - 30);             // flag: tune
+  lv_slider_set_range(fs, 0, FREQ_SLIDER_MAX);
+  style_slider_slim(fs);
+  lv_obj_add_event_cb(fs, tone_freq_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  sys_config.tone_freq_slider = fs;
+
+  // Level slider (short, width = RBTN_W) to the right of the freq display.
+  lv_obj_t *ls = lv_slider_create(p);
+  lv_obj_set_size(ls, RBTN_W, 6);
+  lv_obj_set_pos(ls, SCREEN_W - RBTN_W - 170, 50);  // flag: tune
+  lv_slider_set_range(ls, -600, 0);
+  style_slider_slim(ls);
+  lv_obj_add_event_cb(ls, tone_level_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  sys_config.tone_level_slider = ls;
+
+  // "SIG LVL" label above the level slider (old coarse/fine btn spot).
+  lv_obj_t *sll = lv_label_create(p);
+  lv_label_set_text(sll, "TONE LEVEL");
+  lv_obj_set_style_text_font(sll, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(sll, COL_WHITE, 0);
+  lv_obj_set_pos(sll, SCREEN_W - RBTN_W - 170, 21);  // flag: tune
+
+  // dB readout, 5px right of the slider's right edge.
+  lv_obj_t *lvl = lv_label_create(p);
+  lv_obj_set_style_text_font(lvl, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(lvl, COL_TEXT, 0);
+  lv_label_set_text(lvl, "-40.0dB");
+  lv_obj_set_pos(lvl, SCREEN_W - RBTN_W - 170 + RBTN_W + 5, 46);  // flag: tune
+  sys_config.tone_level_val_label = lvl;
+
+  // COARSE/FINE toggle (RBTN size) above the level slider.
+  lv_obj_t *cf = lv_obj_create(p);
+  lv_obj_remove_style_all(cf);
+  lv_obj_set_size(cf, RBTN_W - 10, RBTN_H);
+  lv_obj_set_pos(cf, SCREEN_W - (RBTN_W - 10) - 30, 41);  // flag: tune (right-anchored, clear of dB readout)
+  lv_obj_set_style_bg_color(cf, COL_BOX_LIST, 0);
+  lv_obj_set_style_bg_opa(cf, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(cf, 2, 0);
+  lv_obj_add_flag(cf, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(cf, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(cf, tone_cf_btn_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *cfl = lv_label_create(cf);
+  lv_label_set_text(cfl, "COARSE");
+  lv_obj_set_style_text_font(cfl, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(cfl, lv_color_hex(0x1A1A1A), 0);
+  lv_obj_center(cfl);
+  sys_config.tone_cf_btn_label = cfl;
+
+  // Large X, top-right corner.
+  lv_obj_t *x = lv_obj_create(p);
+  lv_obj_remove_style_all(x);
+  lv_obj_set_size(x, 28, 28);
+  lv_obj_set_pos(x, SCREEN_W - 34, 4);              // flag: tune
+  lv_obj_add_flag(x, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(x, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(x, tone_x_btn_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *xl = lv_label_create(x);
+  lv_label_set_text(xl, "X");
+  lv_obj_set_style_text_font(xl, &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(xl, COL_WHITE, 0);
+  lv_obj_center(xl);
+}
+
 static void test_signal_dropdown_event_cb(lv_event_t *e) {
   lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
   uint16_t sel = lv_dropdown_get_selected(dd);
@@ -3183,13 +4162,23 @@ static void test_signal_dropdown_event_cb(lv_event_t *e) {
   // Map dropdown index to DSP input source enum
   static const dsp_input_source_t mode_map[] = {
       DSP_INPUT_I2S,              // 0: OFF
-      DSP_INPUT_NOISE,            // 1: Pink Noise
-      DSP_INPUT_SWEEP_30_20K_30S, // 2: Sweep 30-20k (30s)
-      DSP_INPUT_SWEEP_20_20K_35S, // 3: Sweep 20-20k (35s)
-      DSP_INPUT_WARBLE_30_20K_30S // 4: Warble 30-20k (30s)
+      DSP_INPUT_TONE,             // 1: ADJ SINE
+      DSP_INPUT_NOISE,            // 2: Pink Noise
+      DSP_INPUT_SWEEP_30_20K_30S, // 3: Sweep 30-20k (30s)
+      DSP_INPUT_SWEEP_20_20K_35S, // 4: Sweep 20-20k (35s)
+      DSP_INPUT_WARBLE_30_20K_30S // 5: Warble 30-20k (30s)
   };
 
   dsp_set_input_source(mode_map[sel]);
+
+  if (sel == 1) {
+    // ADJ SINE: jump to the last EQ/xover tile and open the tone panel there.
+    int t = nav_return_tile;                 // last EQ/xover origin (guarded 1..4)
+    if (t < 1 || t > 4) t = 1;
+    if (main_tileview) lv_obj_set_tile_id(main_tileview, t, 0, LV_ANIM_OFF);
+    tone_panel_open();
+    return;                                  // tone has independent level
+  }
 
   // Update DSP level (shared across all test signals)
   dsp_update_noise_gen(true, sys_config.test_signal_db);
@@ -3541,12 +4530,24 @@ static void preset_timer_check(void) {
     }
   }
 
+  // --- Fine-adjust readout timeout: hide FINE_READOUT_HOLD_MS after last
+  // activity. Checked every tick (not gated by the 250ms flash divider) so the
+  // hide is prompt. Invalidate the ring area of whichever stage is in fine mode.
+  if (fine_readout_visible &&
+      (lv_tick_get() - fine_readout_active_time) > FINE_READOUT_HOLD_MS) {
+    fine_readout_visible = false;
+    eq_stage_t *fr_stages[] = {&stage_input, &stage_output, &stage_low};
+    for (int i = 0; i < 3; i++)
+      fine_readout_hide(fr_stages[i]);
+  }
+
   // --- Mute/Fine button flash (~4Hz, driven from 50ms timer) ---
   static uint8_t mute_tick = 0;
   static bool flash_state = false;
   if (++mute_tick >= 8) {  // 8 × 33ms = approx250ms
     mute_tick = 0;
     flash_state = !flash_state;
+    fine_flash_on = flash_state;
     eq_stage_t *mute_stages[] = {&stage_input, &stage_output, &stage_low};
     for (int i = 0; i < 3; i++) {
       eq_stage_t *s = mute_stages[i];
@@ -3554,8 +4555,8 @@ static void preset_timer_check(void) {
         s->mute_flash_state = flash_state;
         lv_obj_invalidate(s->mute_btn);
       }
-      if (s->fine_btn && s->fine_mode) {
-        lv_obj_set_style_bg_color(s->fine_btn, flash_state ? COL_SLIDER_IND : COL_BOX_LIST, 0);
+      if (s->fine_circle && s->fine_mode) {
+        lv_obj_invalidate(s->fine_circle);
       }
     }
   }
@@ -3679,6 +4680,7 @@ static void create_config_page(lv_obj_t *parent) {
   sys_config.test_signal_dropdown = lv_dropdown_create(parent);
   lv_dropdown_set_options(sys_config.test_signal_dropdown,
                           "OFF\n"
+                          "ADJ SINE\n"
                           "Pink Noise\n"
                           "Sweep 30-20k (30s)\n"
                           "Sweep 20-20k (35s)\n"
@@ -3930,6 +4932,11 @@ static void create_config_page(lv_obj_t *parent) {
   sys_config.input_gain_slider_r = NULL;
   sys_config.input_gain_label_l = NULL;
   sys_config.input_gain_label_r = NULL;
+
+  // Nav buttons: RET (middle) returns to origin EQ tile, VIS (bottom) to spectrum.
+  // Positions match the EQ page so they don't move when paging.
+  create_nav_button(parent, NAV_Y1, "RET", nav_ret_cb);
+  create_nav_button(parent, NAV_Y2, "VIS", nav_vis_cb);
 }
 
 // ============================================================
@@ -3977,6 +4984,14 @@ static void init_stage_data(eq_stage_t *stage, const char *name) {
 // Update UI after preset load
 // ============================================================
 void eq_ui_update_preset_display(void) {
+  // 0. Preset/session data just replaced the band arrays — clamp selection
+  // into each stage's new active range BEFORE any redraw below reads it
+  // (rebuild_band_buttons, sync_band_display, ring draws all derive from
+  // selected_band).
+  clamp_selected_band(&stage_input);
+  clamp_selected_band(&stage_output);
+  clamp_selected_band(&stage_low);
+
   // 1. Update Curves and Bands
   stage_input.curve_dirty = true;
   stage_output.curve_dirty = true;
@@ -3984,9 +4999,9 @@ void eq_ui_update_preset_display(void) {
   rebuild_band_buttons(&stage_input);
   rebuild_band_buttons(&stage_output);
   rebuild_band_buttons(&stage_low);
-  sync_sliders_to_band(&stage_input);
-  sync_sliders_to_band(&stage_output);
-  sync_sliders_to_band(&stage_low);
+  sync_band_display(&stage_input);
+  sync_band_display(&stage_output);
+  sync_band_display(&stage_low);
   update_channel_button_style(&stage_input);
   update_channel_button_style(&stage_output);
   update_channel_button_style(&stage_low);
@@ -4768,6 +5783,11 @@ static void create_crossover_page(lv_obj_t *parent) {
   // Initial label population + curve compute
   crossover_update_freq_labels();
   crossover_page.curve_dirty = true;
+
+  // Nav buttons: CFG (middle) to config, VIS (bottom) to spectrum. Positions
+  // match the EQ page so they don't move when paging.
+  create_nav_button(parent, NAV_Y1, "CFG", nav_cfg_cb);
+  create_nav_button(parent, NAV_Y2, "VIS", nav_vis_cb);
 }
 
 // ============================================================
@@ -4894,6 +5914,9 @@ void eq_ui_create(void) {
   // BEFORE any code path that might open it. It parents to lv_scr_act(),
   // not to any tile, so it floats above the tileview.
   filter_list_init();
+
+  // Tone panel: built once on the top layer (hidden), shown on ADJ SINE.
+  create_tone_panel();
 
   // FFT/Spectrum is disabled by default — hide tile and pause timer
   lv_obj_add_flag(tile_spectrum, LV_OBJ_FLAG_HIDDEN);

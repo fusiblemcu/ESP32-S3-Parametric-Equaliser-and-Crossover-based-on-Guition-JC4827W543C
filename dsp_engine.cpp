@@ -9,16 +9,6 @@
 #include <freertos/task.h>
 #include <math.h>
 
-// IRAM-resident biquad: verbatim copy of dsps_biquad_f32_aes3 asm, relocated
-// to an .iram1.* section. Keeps the inner loop out of flash regardless of
-// cache state and avoids per-call flash fetch overhead in the audio hot
-// path. Source lives in dsps_biquad_f32_iram.S. Override the esp-dsp macro
-// so all call sites pick up the new symbol transparently.
-extern "C" esp_err_t dsps_biquad_f32_iram(const float *input, float *output,
-                                          int len, float *coef, float *w);
-#undef dsps_biquad_f32
-#define dsps_biquad_f32 dsps_biquad_f32_iram
-
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
@@ -61,7 +51,7 @@ static volatile bool fft_buffer_ready = false;     // Signal to FFT task
 // Scope ring buffer — written every block alongside FFT tap, read by LVGL task
 // via dsp_scope_get(). Power-of-2 so wrap is a bitwise AND.
 DRAM_ATTR volatile float scope_ring_buf[SCOPE_BUF_SIZE];
-volatile int scope_ring_idx = 0;
+volatile uint32_t scope_ring_idx = 0;
 
 DRAM_ATTR static float dsp_fft_output[FFT_SIZE * 2]
     __attribute__((aligned(16)));
@@ -155,10 +145,26 @@ static volatile float output_gain_db_r = 0.0f;
 #define CROSSFADE_SAMPLES 4800
 
 // Low-block size for block-based DSP with coefficient interpolation.
-// Must be 4: gives 12 kHz parameter update rate, keeping any residual stepping
-// artefact above the audible range. LOW_BLOCK=32 produces a 1500 Hz update
-// rate audible as a periodic tonal zipper during fast parameter drags.
+// Parameter targets are re-lerped once per LOW_BLOCK, and the per-sample
+// interp filter paths (biquad_block_tdf2_interp / svf_block_interp) ramp the
+// resulting coefficients continuously across each sub-block — so there is no
+// audible stepping at this update rate. Historical note: before those interp
+// paths existed, the coefficients stepped once per sub-block and LOW_BLOCK=32
+// (1.5 kHz step rate) was audible as a zipper during fast drags, forcing
+// LOW_BLOCK=4; the per-sample ramps removed that constraint.
 #define LOW_BLOCK 32
+
+// Periodic serial diagnostics from the audio task ([DSP] profile line and
+// the FS measurement line). Serial.printf BLOCKS the audio task when the
+// UART TX ring is full (review finding B4) — bounded ~10-20 ms at 115200,
+// inside the DMA cushion, but nonzero. Set 0 for silent release builds: the
+// #if removes the printf calls and their format strings from flash, while
+// all counters (prof_*, lowdrop, FS measurement) keep accumulating so a
+// future boot_config serial command can still query them on demand.
+// When enabled, each print is additionally guarded by availableForWrite()
+// so a congested UART skips the line instead of stalling the audio task.
+#define DSP_SERIAL_DIAG 1
+#define DSP_SERIAL_DIAG_MIN_TX 160   // TX ring space required to emit a line
 // Alpha for 32-sample sub-block — deliberately slowed from the natural
 // 1 - (1-0.005)^32 = 0.148 so that convergence takes ~44ms (longer than the
 // 33ms UI tick). This means new targets arrive while the filter is still
@@ -231,6 +237,11 @@ static portMUX_TYPE dsp_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t prof_block_count = 0;
 static uint32_t prof_worst_us = 0;
 static uint32_t prof_total_us = 0;
+// B2: cumulative frames dropped on the low-DAC non-blocking write path.
+// Every dropped frame is a permanent main/sub time slip of 1/fs — this
+// counter makes that slip visible on the [DSP] profile line instead of
+// silently corrupting the crossover time alignment. Never reset.
+static uint32_t prof_low_drop_frames = 0;
 
 // ============================================================
 // Level meter processing
@@ -361,8 +372,26 @@ static IRAM_ATTR void meter_process(meter_state_t *m, float *buf_l,
 // ============================================================
 // SVF (State Variable Filter) implementation — Mandatory for low frequencies
 // ============================================================
-// Based on the Topology Preserving Transform (TPT) structure by Andrew Simper.
-// Extremely stable even at very low frequencies (down to 1 Hz) and high Q.
+// Simper trapezoidal (TPT) SVF. Coefficients follow the reference paper
+// (Cytomic, SvfLinearTrapOptimised2). The reference publishes mix terms for
+// an input-mix output  y = m0*x + m1*bp + m2*lp;  this engine's block
+// processors use an hp-mix output  y = M0*hp + M1*bp + M2*lp  with
+// hp = x - k*bp - lp.  Substituting x = hp + k*bp + lp converts the
+// reference set to  M0 = m0,  M1 = m0*k + m1,  M2 = m0 + m2,  which
+// collapses to the forms below.  A = 10^(gain/40).
+//
+//   bell:       g = tan(pi*f/fs)          k = 1/(Q*A)   M = (1,   A/Q, 1  )
+//   low shelf:  g = tan(pi*f/fs)/sqrt(A)  k = 1/Q       M = (1,   A/Q, A*A)
+//   high shelf: g = tan(pi*f/fs)*sqrt(A)  k = 1/Q       M = (A*A, A/Q, 1  )
+//
+// Verified by discrete sine-probe simulation of these exact float update
+// equations against the double-precision RBJ math in compute_band_response
+// (the displayed curve) and against the TDF2 K-form path: agreement within
+// 0.0012 dB across bells +/-12 dB Q=6 at 40 Hz, shelves +/-9 dB, and exact
+// unity at zero gain — so the 55/70 Hz topology crossfade is now
+// response-invisible and the on-screen curve is truthful below the boundary.
+// The previous formulas here deviated up to 12 dB from the displayed curve
+// (wrong-signed shelf overshoot lobes, gain-asymmetric bells).
 static void calculate_svf_coeffs(biquad_coeffs_t *c, eq_band_t *b, float fs) {
   float freq = b->freq;
   if (freq > fs * 0.49f)
@@ -370,38 +399,47 @@ static void calculate_svf_coeffs(biquad_coeffs_t *c, eq_band_t *b, float fs) {
   if (freq < 1.0f)
     freq = 1.0f;
 
-  // V = linear gain factor (10^(G/20))
-  float V = powf(10.0f, b->gain / 20.0f);
   float g = tanf((float)M_PI * freq / fs);
-  float k = 1.0f / b->q;
+  float A = powf(10.0f, b->gain / 40.0f); // sqrt of the linear gain
+  float Asq = sqrtf(A);
+  float q = b->q;
 
   c->is_svf = true;
-  c->g = g;
-  c->k = k;
-
-  float h = 1.0f / (1.0f + g * (g + k));
-  c->a1 = h; // Reuse a1 for the common divisor h
 
   switch (b->type) {
   case FTYPE_PEAK:
-    // out = hp + (k*V)*bp + lp = x + k*(V-1)*bp
+    c->g = g;
+    c->k = 1.0f / (q * A);
     c->m0 = 1.0f;
-    c->m1 = k * V;
+    c->m1 = A / q;
     c->m2 = 1.0f;
     break;
   case FTYPE_LOW_SHELF:
-    // out = x + (V-1)*lp = hp + k*bp + V*lp
+    c->g = g / Asq;
+    c->k = 1.0f / q;
     c->m0 = 1.0f;
-    c->m1 = k;
-    c->m2 = V;
+    c->m1 = A / q;
+    c->m2 = A * A;
     break;
   case FTYPE_HIGH_SHELF:
-    // out = x + (V-1)*hp = V*hp + k*bp + lp
-    c->m0 = V;
-    c->m1 = k;
+    c->g = g * Asq;
+    c->k = 1.0f / q;
+    c->m0 = A * A;
+    c->m1 = A / q;
+    c->m2 = 1.0f;
+    break;
+  default:
+    // Out-of-enum safety: exact unity (y = hp + k*bp + lp = x)
+    c->g = g;
+    c->k = 1.0f / q;
+    c->m0 = 1.0f;
+    c->m1 = 1.0f / q;
     c->m2 = 1.0f;
     break;
   }
+
+  // a1 stores the precomputed feedback divisor h — uses the resonator k
+  c->a1 = 1.0f / (1.0f + c->g * (c->g + c->k));
 }
 
 static inline IRAM_ATTR void
@@ -580,70 +618,6 @@ static void calculate_tdf2_coeffs(biquad_coeffs_t *c, const eq_band_t *b,
   c->b2 = b2;
   c->a1 = a1;
   c->a2 = a2;
-}
-
-static void calculate_svf_coeffs(biquad_coeffs_t *c, const eq_band_t *b,
-                                 float fs) {
-  float freq = b->freq;
-  if (freq > fs * 0.49f)
-    freq = fs * 0.49f;
-  if (freq < 2.0f)
-    freq = 2.0f;
-
-  // Simper TPT SVF Coefficient Calculation
-  float g = tanf((float)M_PI * freq / fs);
-  float A = powf(10.0f, b->gain / 40.0f); // A = sqrt(gain_linear)
-  float Asq = sqrtf(A);
-  float k = 1.0f / b->q;
-  float k_svf, m0, m1, m2;
-
-  switch (b->type) {
-  case FTYPE_PEAK: {
-    if (b->gain >= 0) {
-      k_svf = k / A;
-      m0 = 1.0f;
-      m1 = k * A;
-      m2 = 1.0f;
-    } else {
-      k_svf = k * A;
-      m0 = 1.0f;
-      m1 = k / A;
-      m2 = 1.0f;
-    }
-    break;
-  }
-  case FTYPE_LOW_SHELF: {
-    k_svf = k / Asq;
-    m0 = 1.0f;
-    m1 = k * Asq;
-    m2 = A;
-    break;
-  }
-  case FTYPE_HIGH_SHELF: {
-    k_svf = k * Asq;
-    m0 = A;
-    m1 = k * Asq;
-    m2 = 1.0f;
-    break;
-  }
-  default:
-    c->g = 0.0f;
-    c->k = 2.0f;
-    c->m0 = 0.0f;
-    c->m1 = 0.0f;
-    c->m2 = 1.0f;
-    c->a1 = 1.0f;
-    return;
-  }
-
-  c->g = g;
-  c->k = k_svf;
-  c->m0 = m0;
-  c->m1 = m1;
-  c->m2 = m2;
-  // a1 stores the pre-computed feedback compensation 'h'
-  c->a1 = 1.0f / (1.0f + g * (g + k_svf));
-  c->is_svf = true;
 }
 
 static IRAM_ATTR void calculate_biquad(biquad_coeffs_t *c, eq_band_t *b,
@@ -1220,6 +1194,23 @@ static struct {
   float lfo_phase;     // 5 Hz LFO phase for FM (radians)
 } warble_state;
 
+// Static adjustable tone: phase accumulator at a fixed UI-set frequency.
+// tone_freq/tone_level are written by the UI thread (single float writes are
+// atomic on ESP32) and read per-sample here. tone_level is a linear gain.
+static volatile float tone_freq_hz = 1000.0f;
+static volatile float tone_level_lin = 0.01f;  // ~-40 dBFS default
+static float tone_phase = 0.0f;
+
+// Generate one sample of the static tone. Independent level (not dsp_noise_level).
+static inline IRAM_ATTR float generate_tone(void) {
+  const float fs = current_fs;
+  float phase_inc = 2.0f * (float)M_PI * tone_freq_hz / fs;
+  tone_phase += phase_inc;
+  if (tone_phase > 2.0f * (float)M_PI)
+    tone_phase -= 2.0f * (float)M_PI;
+  return fast_sine(tone_phase) * tone_level_lin;
+}
+
 // Reset sweep/warble state on mode change (avoids phase discontinuities)
 static void reset_sweep_state(float start_hz, float end_hz, float duration_s) {
   sweep_state.start_freq = start_hz;
@@ -1688,6 +1679,16 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
   const bool phase_flag = low_phase_invert;
   const bool xover_active = xover_hp.enabled || xover_lp.enabled;
 
+  // B6: freeze all coefficient motion while an NVS commit has the flash
+  // cache disabled. interpolate_coeffs and the per-band predict paths call
+  // tanf/powf (flash-resident libm); with 34 biquads mid-drag that stalled
+  // the audio task 40+ ms per save window. While frozen, coefficients hold
+  // (<=100 ms of paused parameter glide, inaudible) and every smoothing
+  // countdown pauses with them, so the trajectory resumes exactly where it
+  // stopped. The filter block processors themselves are IRAM-resident and
+  // keep running untouched.
+  const bool coeffs_frozen = storage_busy;
+
   static float denorm_sign = 1.0f;
   for (int i = 0; i < count; i++) {
     buf_l[i] += ANTI_DENORMAL_MAG * denorm_sign;
@@ -1789,7 +1790,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
           bool _band_moving_l = (fabsf(stage->cur_params_l[idx_l].freq - stage->target_params_l[idx_l].freq) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_l[idx_l].gain - stage->target_params_l[idx_l].gain) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_l[idx_l].q    - stage->target_params_l[idx_l].q)    > COEFF_SMOOTH_EPSILON);
-          if (stage->crossfade_samples > 0 && _band_moving_l) {
+          if (!coeffs_frozen && stage->crossfade_samples > 0 && _band_moving_l) {
             // Predict end-of-block coefficients by simulating the lerp that
             // interpolate_coeffs will apply after this block, then ramp
             // per-sample — continuous coefficient trajectory, no staircase step.
@@ -1884,7 +1885,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
           bool _band_moving_r = (fabsf(stage->cur_params_r[idx_r].freq - stage->target_params_r[idx_r].freq) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_r[idx_r].gain - stage->target_params_r[idx_r].gain) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_r[idx_r].q    - stage->target_params_r[idx_r].q)    > COEFF_SMOOTH_EPSILON);
-          if (stage->crossfade_samples > 0 && _band_moving_r) {
+          if (!coeffs_frozen && stage->crossfade_samples > 0 && _band_moving_r) {
             biquad_coeffs_t end_c;
             eq_band_t pred = stage->cur_params_r[idx_r];
             const eq_band_t *tgt = &stage->target_params_r[idx_r];
@@ -1993,7 +1994,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
           bool _band_moving_l = (fabsf(stage->cur_params_l[idx_l].freq - stage->target_params_l[idx_l].freq) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_l[idx_l].gain - stage->target_params_l[idx_l].gain) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_l[idx_l].q    - stage->target_params_l[idx_l].q)    > COEFF_SMOOTH_EPSILON);
-          if (stage->crossfade_samples > 0 && _band_moving_l) {
+          if (!coeffs_frozen && stage->crossfade_samples > 0 && _band_moving_l) {
             biquad_coeffs_t end_c;
             eq_band_t pred = stage->cur_params_l[idx_l];
             const eq_band_t *tgt = &stage->target_params_l[idx_l];
@@ -2086,7 +2087,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
           bool _band_moving_r = (fabsf(stage->cur_params_r[idx_r].freq - stage->target_params_r[idx_r].freq) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_r[idx_r].gain - stage->target_params_r[idx_r].gain) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_r[idx_r].q    - stage->target_params_r[idx_r].q)    > COEFF_SMOOTH_EPSILON);
-          if (stage->crossfade_samples > 0 && _band_moving_r) {
+          if (!coeffs_frozen && stage->crossfade_samples > 0 && _band_moving_r) {
             biquad_coeffs_t end_c;
             eq_band_t pred = stage->cur_params_r[idx_r];
             const eq_band_t *tgt = &stage->target_params_r[idx_r];
@@ -2245,7 +2246,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
           bool _band_moving_l = (fabsf(stage->cur_params_l[idx_l].freq - stage->target_params_l[idx_l].freq) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_l[idx_l].gain - stage->target_params_l[idx_l].gain) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_l[idx_l].q    - stage->target_params_l[idx_l].q)    > COEFF_SMOOTH_EPSILON);
-          if (stage->crossfade_samples > 0 && _band_moving_l) {
+          if (!coeffs_frozen && stage->crossfade_samples > 0 && _band_moving_l) {
             biquad_coeffs_t end_c;
             eq_band_t pred = stage->cur_params_l[idx_l];
             const eq_band_t *tgt = &stage->target_params_l[idx_l];
@@ -2338,7 +2339,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
           bool _band_moving_r = (fabsf(stage->cur_params_r[idx_r].freq - stage->target_params_r[idx_r].freq) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_r[idx_r].gain - stage->target_params_r[idx_r].gain) > COEFF_SMOOTH_EPSILON ||
                               fabsf(stage->cur_params_r[idx_r].q    - stage->target_params_r[idx_r].q)    > COEFF_SMOOTH_EPSILON);
-          if (stage->crossfade_samples > 0 && _band_moving_r) {
+          if (!coeffs_frozen && stage->crossfade_samples > 0 && _band_moving_r) {
             biquad_coeffs_t end_c;
             eq_band_t pred = stage->cur_params_r[idx_r];
             const eq_band_t *tgt = &stage->target_params_r[idx_r];
@@ -2386,7 +2387,7 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
       low_block_r[off + i] *= low_gain_current_r    * mute_gain_current[2];
     }
 
-    float fft_active_f = (fft_enabled && !storage_busy) ? 1.0f : 0.0f;
+    const bool fft_active = fft_enabled && !storage_busy;
     float xo_active_f = xover_active ? 1.0f : 0.0f;
     for (int i = 0; i < n; i++) {
       float mono_main = (buf_l[off + i] + buf_r[off + i]) * 0.5f;
@@ -2394,18 +2395,27 @@ static IRAM_ATTR void process_block(float *buf_l, float *buf_r, int count) {
                          low_block_l[off + i] + low_block_r[off + i]) *
                         0.25f;
       float mono = (1.0f - xo_active_f) * mono_main + xo_active_f * mono_full;
-      int can_write = (int)fft_active_f & (dsp_analysis_ptr < FFT_SIZE);
-      dsp_fft_write_buf[dsp_analysis_ptr] = mono;
-      dsp_analysis_ptr += can_write;
+      // FFT tap: the STORE is gated, not just the pointer advance. The old
+      // branchless form always stored and only gated the increment, which
+      // wrote one-past-end whenever dsp_analysis_ptr sat at FFT_SIZE (short
+      // I2S read desyncing block alignment, or storage_busy freezing the
+      // swap) — a repeated 4-byte OOB store into whatever the linker placed
+      // after the write buffer.
+      if (fft_active && dsp_analysis_ptr < FFT_SIZE) {
+        dsp_fft_write_buf[dsp_analysis_ptr] = mono;
+        dsp_analysis_ptr++;
+      }
       // Scope ring buffer — always filled regardless of FFT enable state
       scope_ring_buf[scope_ring_idx & (SCOPE_BUF_SIZE - 1)] = mono;
       scope_ring_idx++;
     }
-    interpolate_coeffs(&stage_input_dsp, n);
-    interpolate_coeffs(&stage_output_dsp, n);
-    interpolate_coeffs(&stage_low_dsp, n);
-    xover_interpolate(&xover_hp, n);
-    xover_interpolate(&xover_lp, n);
+    if (!coeffs_frozen) {
+      interpolate_coeffs(&stage_input_dsp, n);
+      interpolate_coeffs(&stage_output_dsp, n);
+      interpolate_coeffs(&stage_low_dsp, n);
+      xover_interpolate(&xover_hp, n);
+      xover_interpolate(&xover_lp, n);
+    }
   }
 
   for (int i = 0; i < count; i++) {
@@ -2483,10 +2493,12 @@ static IRAM_ATTR void dsp_task(void *pvParameters) {
 
     // Snapshot the storage flag once per block. While set, drop
     // non-essential work so the cache-disable / slow-write window
-    // doesn't blow the per-block budget. Autosave debounce guarantees
-    // there are no pending coefficient updates at the moment this
-    // fires, so skipping sync_coeffs is safe — they pick up next
-    // block. NaN guard stays on (cheap insurance).
+    // doesn't blow the per-block budget. The autosave debounce means no
+    // *pending* (dirty) updates land in this window, so skipping
+    // sync_coeffs is safe — but the interpolation window outlives the
+    // last dirty flag by up to CROSSFADE_SAMPLES, so process_block
+    // additionally freezes all coefficient motion via coeffs_frozen
+    // while this flag is set (see B6 note there). NaN guard stays on.
     const bool minimal = storage_busy;
 
     if (!minimal) {
@@ -2518,6 +2530,7 @@ static IRAM_ATTR void dsp_task(void *pvParameters) {
 
       for (int i = 0; i < frame_count; i++) {
         float sig = 0.0f;
+        bool tone = false;
 
         switch (dsp_input_source) {
         case DSP_INPUT_NOISE:
@@ -2532,12 +2545,16 @@ static IRAM_ATTR void dsp_task(void *pvParameters) {
         case DSP_INPUT_WARBLE_30_20K_30S:
           sig = generate_warble();
           break;
+        case DSP_INPUT_TONE:
+          sig = generate_tone();  // already includes independent tone level
+          tone = true;
+          break;
         default: // DSP_INPUT_I2S when I2S not running → silence
           sig = 0.0f;
           break;
         }
 
-        sig *= test_lvl;
+        if (!tone) sig *= test_lvl;  // shared level for noise/sweep/warble only
         block_l[i] = sig;
         block_r[i] = sig;
       }
@@ -2561,7 +2578,13 @@ static IRAM_ATTR void dsp_task(void *pvParameters) {
       total_frames += frame_count;
       if (millis() - last_diag_ms > 5000) {
           float actual_fs = (float)total_frames / ((millis() - last_diag_ms) / 1000.0f);
-          Serial.printf("DSP Diag: Target FS=%.0f, Measured FS=%.1f\n", current_fs, actual_fs);
+#if DSP_SERIAL_DIAG
+          if (Serial.availableForWrite() > DSP_SERIAL_DIAG_MIN_TX) {
+            Serial.printf("DSP Diag: Target FS=%.0f, Measured FS=%.1f\n", current_fs, actual_fs);
+          }
+#else
+          (void)actual_fs;
+#endif
           last_diag_ms = millis();
           total_frames = 0;
       }
@@ -2580,13 +2603,21 @@ static IRAM_ATTR void dsp_task(void *pvParameters) {
                             stage_low_dsp.num_active_bands_r;
         int xover_bq = (xover_hp.enabled ? xover_hp.num_biquads * 2 : 0) +
                        (xover_lp.enabled ? xover_lp.num_biquads * 2 : 0);
-        Serial.printf(
-            "[DSP] %d frames | avg %lu us | worst %lu us | budget "
-            "%lu us | biquads: eq=%d xover=%d\n",
-            frame_count, (unsigned long)(prof_total_us / prof_block_count),
-            (unsigned long)prof_worst_us,
-            (unsigned long)(frame_count * 1000000UL / (uint32_t)current_fs),
-            total_biquads, xover_bq);
+#if DSP_SERIAL_DIAG
+        if (Serial.availableForWrite() > DSP_SERIAL_DIAG_MIN_TX) {
+          Serial.printf(
+              "[DSP] %d frames | avg %lu us | worst %lu us | budget "
+              "%lu us | biquads: eq=%d xover=%d | lowdrop=%lu (%.1f ms slip)\n",
+              frame_count, (unsigned long)(prof_total_us / prof_block_count),
+              (unsigned long)prof_worst_us,
+              (unsigned long)(frame_count * 1000000UL / (uint32_t)current_fs),
+              total_biquads, xover_bq, (unsigned long)prof_low_drop_frames,
+              (double)(prof_low_drop_frames * 1000.0f / current_fs));
+        }
+#else
+        (void)total_biquads;
+        (void)xover_bq;
+#endif
         prof_block_count = 0;
         prof_worst_us = 0;
         prof_total_us = 0;
@@ -2658,7 +2689,14 @@ static IRAM_ATTR void dsp_task(void *pvParameters) {
           i2s_low_write_buf[i * 2] = lrintf(l * I2S_DENORM_FACTOR_24) << 8;
           i2s_low_write_buf[i * 2 + 1] = lrintf(r * I2S_DENORM_FACTOR_24) << 8;
         }
-        i2s_low_output_write(i2s_low_write_buf, frame_count, 0);
+        // i2s_low_output_write returns frames written (size_t); with
+        // timeout=0 a full DMA ring yields a partial or zero write rather
+        // than a stall. Count the shortfall — it is permanent sub-path slip.
+        size_t low_written =
+            i2s_low_output_write(i2s_low_write_buf, frame_count, 0);
+        if (low_written < (size_t)frame_count) {
+          prof_low_drop_frames += (uint32_t)((size_t)frame_count - low_written);
+        }
       }
     }
 
@@ -2869,6 +2907,9 @@ void dsp_set_input_source(dsp_input_source_t source) {
   case DSP_INPUT_WARBLE_30_20K_30S:
     reset_warble_state(30.0f, 20000.0f, 30.0f);
     break;
+  case DSP_INPUT_TONE:
+    tone_phase = 0.0f;  // reset phase to avoid discontinuity on entry
+    break;
   default:
     break; // I2S and noise don't need state reset
   }
@@ -2877,6 +2918,16 @@ void dsp_set_input_source(dsp_input_source_t source) {
 void dsp_update_noise_gen(bool enabled, float level_db) {
   (void)enabled; // Dispatch is via dsp_input_source, not this flag
   dsp_noise_level = powf(10.0f, level_db / 20.0f);
+}
+
+void dsp_set_tone_freq(float hz) {
+  if (hz < 1.0f) hz = 1.0f;
+  if (hz > current_fs * 0.49f) hz = current_fs * 0.49f;  // below Nyquist
+  tone_freq_hz = hz;
+}
+
+void dsp_set_tone_level(float level_db) {
+  tone_level_lin = powf(10.0f, level_db / 20.0f);
 }
 
 void dsp_set_sample_rate(float fs) {
@@ -3015,8 +3066,11 @@ void dsp_scope_get(float *dst, int len) {
   if (len > SCOPE_BUF_SIZE) len = SCOPE_BUF_SIZE;
   // Snapshot the most recent `len` samples in time order (oldest first).
   // Read the write cursor once to get a consistent window.
-  int end = (int)scope_ring_idx;
-  int start = (end - len) & (SCOPE_BUF_SIZE - 1);
+  // Unsigned monotonic cursor: wraps at 2^32 (~24.9 h at 48 kHz) with
+  // well-defined arithmetic; the previous signed int hit signed-overflow UB
+  // after ~12.4 h of uptime.
+  uint32_t end = scope_ring_idx;
+  int start = (int)((end - (uint32_t)len) & (uint32_t)(SCOPE_BUF_SIZE - 1));
   int first = SCOPE_BUF_SIZE - start;
   if (first >= len) {
     memcpy(dst, (const float *)scope_ring_buf + start, len * sizeof(float));
