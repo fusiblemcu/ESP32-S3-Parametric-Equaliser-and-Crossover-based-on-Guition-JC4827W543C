@@ -53,11 +53,12 @@ The firmware uses a single I2S peripheral in **full-duplex mode** with shared cl
 ---
 NOTE: Place lv_conf.h in arduino/libraries folder for compiling
 
-UPDATE 08/07/26 
+# UPDATE 08/07/26 
 
 New GUI, test tone, visualiser mode, DSP code fixes 
 
-## Changes (LLM Generated text)
+### Changes 
+(LLM Generated text)
 
 ### New
 - **Whirlpool visualizer (mode 6)** — audio-reactive fractal flame (chaos-game IFS)
