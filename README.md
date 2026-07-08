@@ -52,3 +52,39 @@ The firmware uses a single I2S peripheral in **full-duplex mode** with shared cl
 
 ---
 Put lv_conf.h in arduino/libraries folder
+
+UPDATE 08/07/26 
+
+New GUI, test tone, visualiser mode, DSP code fixes 
+
+## Changes (LLM Generated text)
+
+### New
+- **Whirlpool visualizer (mode 6)** — audio-reactive fractal flame (chaos-game IFS)
+  rendered into a persistent PSRAM framebuffer. Eight spectral bands drive eight
+  morphing transforms; response is level-independent (dB-relative + AGC), so it
+  works at low listening volumes. Swipe up/down on the visualizer page to reach it.
+
+### Audio fixes
+- **SVF EQ coefficients corrected** (sub-55 Hz bands and high-Q low-mid bands).
+  Previous formulas deviated up to 12 dB from the displayed curve, with
+  wrong-signed shelf overshoot and asymmetric bell cuts. Now matched to the
+  Simper reference: measured agreement with the on-screen curve ≤ 0.0012 dB,
+  and the TDF2↔SVF topology handover is response-invisible. Low-frequency
+  presets tuned by ear against the old response may need retouching.
+- **Coefficient motion frozen during NVS saves** — parameter smoothing no longer
+  calls flash-resident math while the flash cache is off, removing that
+  contribution to save-time stalls.
+
+### Stability / diagnostics
+- Fixed a one-past-end buffer write in the FFT tap (latent memory corruption).
+- Sub-DAC write shortfalls are now counted and reported on the `[DSP]` line
+  (`lowdrop`) — makes any main/sub time slip visible instead of silent.
+- Audio-task serial diagnostics are now guarded (never block the audio path)
+  and can be compiled out via `DSP_SERIAL_DIAG` for silent release builds.
+
+### Internals
+- Removed dead code: unreachable duplicate SVF coefficient function and the
+  unused IRAM assembly biquad (frees IRAM).
+- Scope ring cursor made unsigned (defined wrap on multi-day uptimes);
+  stale LOW_BLOCK documentation corrected.
