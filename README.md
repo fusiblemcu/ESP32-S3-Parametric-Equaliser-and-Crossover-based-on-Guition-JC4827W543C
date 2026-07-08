@@ -55,7 +55,7 @@ NOTE: Place lv_conf.h in arduino/libraries folder for compiling
 
 # UPDATE 08/07/26 
 
-New GUI, test tone, visualiser mode, DSP code fixes 
+New GUI, test tone, visualiser mode, DSP code fixes, added STEP files for basic enclosure 
 
 ### Changes 
 (LLM Generated text)
