@@ -4241,6 +4241,111 @@ static void input_source_event_cb(lv_event_t *e) {
 // Storage backend switch (NVS / SD). Off = NVS, On = SD. Persists the new
 // selection to cfg_boot/storage and reboots — the active backend can only
 // be safely swapped at boot (no in-flight write hazards, no stale handles).
+//
+// The reboot lands on whatever the new backend holds; if that is empty or
+// absent, the device boots to defaults (all stages muted — see dsp_engine.cpp
+// dsp_stage_muted). Because a stray tap on this switch therefore blows away
+// the running state and reboots, it is gated behind a confirm dialog.
+static lv_obj_t *storage_confirm_panel = NULL;   // top-layer modal, built lazily
+static uint8_t   storage_confirm_target = 0;     // BOOT_STORAGE_* awaiting confirm
+
+// Put the switch back where the active backend says it should be. Called on
+// cancel — LVGL has already flipped the widget visually by the time the
+// VALUE_CHANGED callback runs.
+static void storage_switch_revert(void) {
+  if (!sys_config.storage_switch)
+    return;
+  if (boot_config_get_storage() == BOOT_STORAGE_SD)
+    lv_obj_add_state(sys_config.storage_switch, LV_STATE_CHECKED);
+  else
+    lv_obj_clear_state(sys_config.storage_switch, LV_STATE_CHECKED);
+}
+
+static void storage_confirm_hide(void) {
+  if (storage_confirm_panel)
+    lv_obj_add_flag(storage_confirm_panel, LV_OBJ_FLAG_HIDDEN);
+  if (main_tileview)
+    lv_obj_add_flag(main_tileview, LV_OBJ_FLAG_SCROLLABLE); // restore swipe
+}
+
+static void storage_confirm_cancel_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    return;
+  storage_confirm_hide();
+  storage_switch_revert();
+}
+
+static void storage_confirm_ok_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    return;
+  storage_confirm_hide();
+  if (!boot_config_set_storage(storage_confirm_target)) {
+    Serial.println("[BOOT] Failed to write storage selector");
+    storage_switch_revert();
+    return;
+  }
+  Serial.printf("[BOOT] Storage selector = %s. Rebooting...\n",
+                storage_confirm_target == BOOT_STORAGE_SD ? "SD" : "NVS");
+  delay(300);
+  ESP.restart();
+}
+
+// Build once on the top layer (same pattern as the tone panel) so it floats
+// above the tileview and absorbs touches to the page beneath.
+static void storage_confirm_create(void) {
+  lv_obj_t *scr = lv_layer_top();
+  lv_obj_t *p = lv_obj_create(scr);
+  lv_obj_remove_style_all(p);
+  lv_obj_set_size(p, SCREEN_W, SCREEN_H);
+  lv_obj_set_pos(p, 0, 0);
+  lv_obj_set_style_bg_color(p, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(p, 210, 0);
+  lv_obj_set_style_radius(p, 0, 0);
+  lv_obj_set_style_pad_all(p, 0, 0);
+  lv_obj_add_flag(p, LV_OBJ_FLAG_CLICKABLE);   // absorb stray taps
+  lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+  storage_confirm_panel = p;
+
+  lv_obj_t *l1 = lv_label_create(p);
+  lv_obj_set_style_text_font(l1, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(l1, COL_WHITE, 0);
+  lv_label_set_text(l1, "Switch storage backend?");
+  lv_obj_set_pos(l1, 120, 78);
+
+  lv_obj_t *l2 = lv_label_create(p);
+  lv_obj_set_style_text_font(l2, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(l2, COL_TEXT, 0);
+  lv_label_set_text(l2, "Device will reboot and load from the new backend.");
+  lv_obj_set_pos(l2, 68, 106);
+
+  lv_obj_t *cancel = lv_button_create(p);
+  lv_obj_set_size(cancel, 96, 34);
+  lv_obj_set_pos(cancel, 108, 152);
+  lv_obj_set_style_bg_color(cancel, COL_BOX, 0);
+  lv_obj_set_style_border_color(cancel, COL_BOX_BORDER, 0);
+  lv_obj_set_style_border_width(cancel, 1, 0);
+  lv_obj_add_event_cb(cancel, storage_confirm_cancel_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *cl = lv_label_create(cancel);
+  lv_obj_set_style_text_font(cl, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(cl, COL_TEXT, 0);
+  lv_label_set_text(cl, "CANCEL");
+  lv_obj_center(cl);
+
+  lv_obj_t *ok = lv_button_create(p);
+  lv_obj_set_size(ok, 96, 34);
+  lv_obj_set_pos(ok, 268, 152);
+  lv_obj_set_style_bg_color(ok, COL_BOX_ACT, 0);
+  lv_obj_set_style_border_color(ok, COL_BOX_BDR_ACT, 0);
+  lv_obj_set_style_border_width(ok, 1, 0);
+  lv_obj_add_event_cb(ok, storage_confirm_ok_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *okl = lv_label_create(ok);
+  lv_obj_set_style_text_font(okl, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(okl, COL_WHITE, 0);
+  lv_label_set_text(okl, "SWITCH");
+  lv_obj_center(okl);
+}
+
 static void storage_switch_event_cb(lv_event_t *e) {
   if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED)
     return;
@@ -4249,14 +4354,14 @@ static void storage_switch_event_cb(lv_event_t *e) {
                                                           : BOOT_STORAGE_NVS;
   if (target == boot_config_get_storage())
     return; // no-op
-  if (!boot_config_set_storage(target)) {
-    Serial.println("[BOOT] Failed to write storage selector");
-    return;
-  }
-  Serial.printf("[BOOT] Storage selector = %s. Rebooting...\n",
-                target == BOOT_STORAGE_SD ? "SD" : "NVS");
-  delay(300);
-  ESP.restart();
+
+  storage_confirm_target = target;
+  if (!storage_confirm_panel)
+    storage_confirm_create();
+  lv_obj_clear_flag(storage_confirm_panel, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(storage_confirm_panel);
+  if (main_tileview)
+    lv_obj_clear_flag(main_tileview, LV_OBJ_FLAG_SCROLLABLE); // no swipe while modal
 }
 
 static void create_config_row_slider(lv_obj_t *parent, int y,
@@ -5210,10 +5315,14 @@ static void crossover_curve_draw_cb(lv_event_t *e);
 
 // --------- Curve computation ---------
 //
-// Sum curve is the magnitude (incoherent) sum:
-//     sum_dB = 20·log10(sqrt(|H_HP|² + |H_LP|²))
-// For LR filters at the crossover point this is flat (each is -6dB, sum is
-// 0dB). For Butterworth (-3dB at crossover) the sum has a +3dB bump at fc.
+// Sum curve is the coherent in-phase amplitude sum (honours phase invert):
+//     sum_dB = 20·log10(|H_HP| ± |H_LP|)
+// Both branches carry the same source signal, so they sum by amplitude, not
+// by power. For LR filters at the crossover point this is flat (each is -6dB
+// = 0.5 linear, 0.5 + 0.5 = 1.0 = 0dB). For Butterworth (-3dB at crossover)
+// the sum has a +3dB bump at fc. Overlapped corners (HP well below LP) show
+// the full +6dB of both branches passing the overlap band at unity.
+// Delay is not modelled — this is the in-phase reference sum.
 static void crossover_recompute_curve(void) {
   ui_xover_t ui_hp, ui_lp;
   ui_xover_calc(&xover_settings.hp, current_fs, true, &ui_hp);
@@ -5226,10 +5335,12 @@ static void crossover_recompute_curve(void) {
     float hp_db = ui_xover_eval(&ui_hp, freq, current_fs);
     float lp_db = ui_xover_eval(&ui_lp, freq, current_fs);
 
-    // Magnitude sum
+    // Coherent amplitude sum (see header comment): the branches carry the
+    // same signal, so they add linearly. Phase invert flips the low branch.
     float hp_lin = powf(10.0f, hp_db / 20.0f);
     float lp_lin = powf(10.0f, lp_db / 20.0f);
-    float sum_lin = sqrtf(hp_lin * hp_lin + lp_lin * lp_lin);
+    float sum_lin =
+        fabsf(hp_lin + (xover_settings.phase_invert ? -lp_lin : lp_lin));
     float sum_db = (sum_lin > 1e-10f) ? 20.0f * log10f(sum_lin) : -100.0f;
 
     // Clamp into display range

@@ -78,7 +78,15 @@ static float dsp_iso_freqs[NUM_SPECTRUM_BANDS];
 
 float current_fs = 48000.0f;
 volatile bool dsp_suspended = false;
-volatile bool dsp_stage_muted[3] = {false, false, false};
+// Boot default: ALL STAGES MUTED. This is driver protection, not a preference.
+// These values only survive when no valid working state loads — fresh chip,
+// wiped NVS, or a storage-backend switch to empty/absent media. In those cases
+// the crossover falls back to its own defaults, and an unmuted full-range or
+// mis-crossed output into a tweeter/compression-driver amp is an expensive
+// accident. Every normal boot loads a preset, whose stored mute flags override
+// these (preset_store.cpp unpack calls dsp_set_mute for all three stages), so
+// normal use is unaffected. Unmuting after a defaults-boot is a deliberate act.
+volatile bool dsp_stage_muted[3] = {true, true, true};
 static float mute_gain_current[3] = {1.0f, 1.0f, 1.0f};  // ramped toward 0/1
 
 void dsp_set_mute(int stage_idx, bool muted) {
