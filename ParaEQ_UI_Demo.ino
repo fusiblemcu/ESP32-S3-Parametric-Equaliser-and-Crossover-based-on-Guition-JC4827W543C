@@ -5,8 +5,8 @@
 //   - Dev Device Pins            (Library Manager, v0.0.2)
 //   - TAMC_GT911                 (Library Manager, v1.0.2)
 //
-// IMPORTANT: You must configure lv_conf.h before compiling.
-// See README.md for required settings.
+// IMPORTANT: Use supplied lv_conf.h place in Libraries folder
+
 
 #include <lvgl.h>
 #include <PINS_JC4827W543.h>
